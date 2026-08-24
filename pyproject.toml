@@ -1,6 +1,6 @@
 [project]
-name = "tap-nextdoor"
-version = "0.0.1"
+name = "meltanolabs-tap-nextdoor"
+dynamic = ["version"]
 description = "Singer tap for the Nextdoor Ads Manager (NAM) API, built with the Meltano Singer SDK."
 readme = "README.md"
 authors = [{ name = "Mathew Abraham", email = "mabraham@meltano.com" }]
@@ -77,8 +77,20 @@ convention = "google"
 [build-system]
 requires = [
     "hatchling>=1.32.0,<2",
+    "hatch-vcs>=0.5",
 ]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The distribution is named meltanolabs-tap-nextdoor, so the package
+# directory has to be declared explicitly.
+packages = [
+    "tap_nextdoor",
+]
+
+[tool.hatch.version]
+fallback-version = "0.0.0.dev0"
+source = "vcs"
 
 [tool.tox]
 min_version = "4.22"
