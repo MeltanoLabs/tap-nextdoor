@@ -24,7 +24,6 @@ import csv
 import io
 import re
 import typing as t
-from datetime import date, datetime, timezone
 
 import requests
 from singer_sdk import typing as th
@@ -69,12 +68,17 @@ class UserStream(MeStream):
         th.Property(
             "id", th.StringType, required=True, description="The user's ads ID"
         ),
-        th.Property("name", th.StringType),
-        th.Property("email", th.StringType),
-        th.Property("email_confirmed", th.BooleanType),
+        th.Property("name", th.StringType, description="User's display name"),
+        th.Property("email", th.StringType, description="User's email address"),
+        th.Property(
+            "email_confirmed",
+            th.BooleanType,
+            description="Whether the user has confirmed their email",
+        ),
         th.Property(
             "advertisers_with_access",
-            th.ArrayType(
+            description="Advertisers this user can access, with their role on each",
+            wrapped=th.ArrayType(
                 th.ObjectType(
                     th.Property("advertiser_id", th.StringType),
                     th.Property("role", th.StringType),
@@ -93,10 +97,22 @@ class ProfileStream(MeStream):
         th.Property(
             "id", th.StringType, required=True, description="The profile's ads ID"
         ),
-        th.Property("name", th.StringType),
-        th.Property("associated_user_ids", th.ArrayType(th.StringType)),
-        th.Property("payment_profile_id", th.StringType),
-        th.Property("is_ad_agency", th.BooleanType),
+        th.Property("name", th.StringType, description="Profile name"),
+        th.Property(
+            "associated_user_ids",
+            th.ArrayType(th.StringType),
+            description="Users attached to this profile",
+        ),
+        th.Property(
+            "payment_profile_id",
+            th.StringType,
+            description="Billing profile backing this advertising profile",
+        ),
+        th.Property(
+            "is_ad_agency",
+            th.BooleanType,
+            description="Whether the profile represents an agency",
+        ),
     ).to_dict()
 
 
@@ -113,8 +129,20 @@ class AdvertiserStream(MeStream):
     records_jsonpath = "$.user.advertisers_with_access[*]"
     primary_keys = ("advertiser_id",)
     schema = th.PropertiesList(
-        th.Property("advertiser_id", th.StringType, required=True),
-        th.Property("role", th.StringType),
+        th.Property(
+            "advertiser_id",
+            th.StringType,
+            required=True,
+            description=(
+                "Advertiser ID. Sourced from `id` in the API response, which "
+                "the reference docs call advertiser_id."
+            ),
+        ),
+        th.Property(
+            "role",
+            th.StringType,
+            description="The token holder's role on this advertiser, e.g. CLIENT_ADMIN",
+        ),
     ).to_dict()
 
     def post_process(self, row: dict, context: Context | None = None) -> dict | None:
@@ -146,19 +174,65 @@ class CampaignStream(NextdoorStream):
     parent_stream_type = AdvertiserStream
 
     schema = th.PropertiesList(
-        th.Property("id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
-        th.Property("name", th.StringType),
-        th.Property("status", th.StringType),
-        th.Property("user_status", th.StringType),
-        th.Property("objective", th.StringType),
+        th.Property("id", th.StringType, required=True, description="Campaign ID"),
+        th.Property(
+            "advertiser_id",
+            th.StringType,
+            description="ID of the advertiser that owns the campaign",
+        ),
+        th.Property("name", th.StringType, description="Campaign name"),
+        th.Property(
+            "status",
+            th.StringType,
+            description=(
+                "Effective delivery status, e.g. ACTIVE, PAUSED, ARCHIVED. "
+                "May differ from user_status when a parent is paused."
+            ),
+        ),
+        th.Property(
+            "user_status",
+            th.StringType,
+            description="Status explicitly set by the advertiser",
+        ),
+        th.Property(
+            "objective",
+            th.StringType,
+            description="Campaign objective, e.g. CONVERSION, TRAFFIC",
+        ),
         # Returned live but absent from the reference docs.
-        th.Property("sub_objective", th.StringType),
-        th.Property("special_ad_category", th.BooleanType),
-        th.Property("created_at", th.DateTimeType),
-        th.Property("updated_at", th.DateTimeType),
-        th.Property("start_time", th.DateTimeType),
-        th.Property("end_time", th.DateTimeType),
+        th.Property(
+            "sub_objective",
+            th.StringType,
+            description=(
+                "Objective refinement, e.g. WEBSITE_CONVERSIONS. Undocumented."
+            ),
+        ),
+        th.Property(
+            "special_ad_category",
+            th.BooleanType,
+            description=(
+                "Whether the campaign is in a regulated category (housing, "
+                "credit, employment). Undocumented."
+            ),
+        ),
+        th.Property(
+            "created_at", th.DateTimeType, description="When the campaign was created"
+        ),
+        th.Property(
+            "updated_at",
+            th.DateTimeType,
+            description="When the campaign was last modified; replication key",
+        ),
+        th.Property(
+            "start_time",
+            th.DateTimeType,
+            description="Scheduled start of delivery",
+        ),
+        th.Property(
+            "end_time",
+            th.DateTimeType,
+            description="Scheduled end of delivery; absent if open-ended",
+        ),
     ).to_dict()
 
     def get_child_context(self, record: dict, context: Context | None) -> dict:
@@ -197,17 +271,36 @@ class AdGroupStream(NextdoorStream):
     )
 
     schema = th.PropertiesList(
-        th.Property("id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
-        th.Property("campaign_id", th.StringType),
-        th.Property("name", th.StringType),
-        th.Property("status", th.StringType),
-        th.Property("user_status", th.StringType),
-        th.Property("placements", th.ArrayType(th.StringType)),
-        th.Property("audience_network_is_on", th.BooleanType),
+        th.Property("id", th.StringType, required=True, description="Ad group ID"),
+        th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
+        th.Property("campaign_id", th.StringType, description="Parent campaign ID"),
+        th.Property("name", th.StringType, description="Ad group name"),
+        th.Property(
+            "status",
+            th.StringType,
+            description=(
+                "Effective delivery status, e.g. ACTIVE, PAUSED_DUE_TO_CAMPAIGN_PAUSE"
+            ),
+        ),
+        th.Property(
+            "user_status",
+            th.StringType,
+            description="Status explicitly set by the advertiser",
+        ),
+        th.Property(
+            "placements",
+            th.ArrayType(th.StringType),
+            description="Where ads may serve, e.g. FEED, FSF, RHR",
+        ),
+        th.Property(
+            "audience_network_is_on",
+            th.BooleanType,
+            description="Whether off-Nextdoor audience network delivery is enabled",
+        ),
         th.Property(
             "bid",
-            th.ObjectType(
+            description="Bid settings for the ad group",
+            wrapped=th.ObjectType(
                 # Money is returned as a currency-prefixed string, e.g. "GBP 3.35".
                 th.Property("amount", th.StringType),
                 th.Property("pricing_type", th.StringType),
@@ -216,17 +309,25 @@ class AdGroupStream(NextdoorStream):
         ),
         th.Property(
             "budget",
-            th.ObjectType(
+            description="Budget settings for the ad group",
+            wrapped=th.ObjectType(
                 th.Property("amount", th.StringType),
                 th.Property("budget_type", th.StringType),
                 th.Property("lifetime_delivery_cap_type", th.StringType),
             ),
         ),
-        th.Property("start_time", th.DateTimeType),
-        th.Property("end_time", th.DateTimeType),
+        th.Property(
+            "start_time", th.DateTimeType, description="Scheduled start of delivery"
+        ),
+        th.Property(
+            "end_time",
+            th.DateTimeType,
+            description="Scheduled end of delivery; absent if open-ended",
+        ),
         th.Property(
             "frequency_caps",
-            th.ArrayType(
+            description="Limits on how often one neighbour sees these ads",
+            wrapped=th.ArrayType(
                 th.ObjectType(
                     th.Property("max_impressions", th.StringType),
                     th.Property("num_timeunits", th.StringType),
@@ -236,7 +337,8 @@ class AdGroupStream(NextdoorStream):
         ),
         th.Property(
             "targeting",
-            th.ObjectType(
+            description="Geographic, audience, interest and daypart targeting",
+            wrapped=th.ObjectType(
                 th.Property(
                     "included_location_targeting_ids", th.ArrayType(th.StringType)
                 ),
@@ -258,8 +360,21 @@ class AdGroupStream(NextdoorStream):
                 ),
             ),
         ),
-        th.Property("created_at", th.DateTimeType),
-        th.Property("updated_at", th.DateTimeType),
+        th.Property(
+            "custom_audience_ids",
+            th.ArrayType(th.StringType),
+            description=(
+                "Custom audience IDs. Documented as a top-level field but not "
+                "returned by the live API, which nests them under "
+                "targeting.custom_audience_targeting; both are read."
+            ),
+        ),
+        th.Property("created_at", th.DateTimeType, description="When it was created"),
+        th.Property(
+            "updated_at",
+            th.DateTimeType,
+            description="When it was last modified; replication key",
+        ),
     ).to_dict()
 
     def get_body_params(self, context: Context | None) -> dict[str, t.Any]:
@@ -325,15 +440,35 @@ class AdStream(NextdoorStream):
     state_partitioning_keys = ("advertiser_id", "adgroup_id")
 
     schema = th.PropertiesList(
-        th.Property("id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
-        th.Property("adgroup_id", th.StringType),
-        th.Property("creative_id", th.StringType),
-        th.Property("name", th.StringType),
-        th.Property("status", th.StringType),
-        th.Property("user_status", th.StringType),
-        th.Property("created_at", th.DateTimeType),
-        th.Property("updated_at", th.DateTimeType),
+        th.Property("id", th.StringType, required=True, description="Ad ID"),
+        th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
+        th.Property("adgroup_id", th.StringType, description="Parent ad group ID"),
+        th.Property(
+            "creative_id",
+            th.StringType,
+            description="Creative rendered by this ad; joins to the creatives stream",
+        ),
+        th.Property("name", th.StringType, description="Ad name"),
+        th.Property(
+            "status",
+            th.StringType,
+            description=(
+                "Effective delivery status, e.g. ACTIVE, INACTIVE, ARCHIVED, INELIGIBLE"
+            ),
+        ),
+        th.Property(
+            "user_status",
+            th.StringType,
+            description="Status explicitly set by the advertiser",
+        ),
+        th.Property(
+            "created_at", th.DateTimeType, description="When the ad was created"
+        ),
+        th.Property(
+            "updated_at",
+            th.DateTimeType,
+            description="When the ad was last modified; replication key",
+        ),
     ).to_dict()
 
     def get_body_params(self, context: Context | None) -> dict[str, t.Any]:
@@ -363,27 +498,61 @@ class CreativeStream(NextdoorStream):
     parent_stream_type = AdvertiserStream
 
     schema = th.PropertiesList(
-        th.Property("id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
-        th.Property("name", th.StringType),
-        th.Property("status", th.StringType),
-        th.Property("placement", th.StringType),
+        th.Property("id", th.StringType, required=True, description="Creative ID"),
+        th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
+        th.Property("name", th.StringType, description="Creative name"),
+        th.Property(
+            "status",
+            th.StringType,
+            description="Review status, e.g. APPROVED",
+        ),
+        th.Property(
+            "placement", th.StringType, description="Placement this creative targets"
+        ),
         # Returned live but absent from the reference docs.
-        th.Property("creative_type", th.StringType),
-        th.Property("text_overlays", th.ArrayType(th.StringType)),
-        th.Property("advertiser_name", th.StringType),
-        th.Property("headline", th.StringType),
-        th.Property("body_text", th.StringType),
-        th.Property("offer_text", th.StringType),
-        th.Property("price", th.StringType),
-        th.Property("cta", th.StringType),
-        th.Property("canvas_image_url", th.StringType),
-        th.Property("logo_image_url", th.StringType),
-        th.Property("clickthrough_url", th.StringType),
-        th.Property("impression_tracking_urls", th.ArrayType(th.StringType)),
-        th.Property("click_tracking_urls", th.ArrayType(th.StringType)),
-        th.Property("created_at", th.DateTimeType),
-        th.Property("updated_at", th.DateTimeType),
+        th.Property(
+            "creative_type",
+            th.StringType,
+            description=("Creative format, e.g. IMAGE_NATIVE_V3. Undocumented."),
+        ),
+        th.Property(
+            "text_overlays",
+            th.ArrayType(th.StringType),
+            description="Text rendered over the image. Undocumented.",
+        ),
+        th.Property(
+            "advertiser_name",
+            th.StringType,
+            description="Advertiser name shown to neighbours",
+        ),
+        th.Property("headline", th.StringType, description="Headline text"),
+        th.Property("body_text", th.StringType, description="Body copy"),
+        th.Property("offer_text", th.StringType, description="Offer text, if any"),
+        th.Property("price", th.StringType, description="Displayed price, if any"),
+        th.Property(
+            "cta", th.StringType, description="Call to action, e.g. Learn more"
+        ),
+        th.Property(
+            "canvas_image_url", th.StringType, description="Main creative image"
+        ),
+        th.Property("logo_image_url", th.StringType, description="Advertiser logo"),
+        th.Property("clickthrough_url", th.StringType, description="Destination URL"),
+        th.Property(
+            "impression_tracking_urls",
+            th.ArrayType(th.StringType),
+            description="Third-party impression pixels",
+        ),
+        th.Property(
+            "click_tracking_urls",
+            th.ArrayType(th.StringType),
+            description="Third-party click trackers",
+        ),
+        th.Property("created_at", th.DateTimeType, description="When it was created"),
+        th.Property(
+            "updated_at",
+            th.DateTimeType,
+            description="When it was last modified; replication key",
+        ),
     ).to_dict()
 
 
@@ -403,10 +572,17 @@ class ReportStream(NextdoorStream):
     parent_stream_type = AdvertiserStream
 
     schema = th.PropertiesList(
-        th.Property("id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
-        th.Property("name", th.StringType),
-        th.Property("download_url", th.StringType),
+        th.Property("id", th.StringType, required=True, description="Report ID"),
+        th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
+        th.Property("name", th.StringType, description="Report name"),
+        th.Property(
+            "download_url",
+            th.StringType,
+            description=(
+                "Presigned S3 URL for the report CSV. Short-lived, and carries "
+                "embedded AWS credentials - treat as a secret."
+            ),
+        ),
     ).to_dict()
 
 
@@ -435,31 +611,97 @@ class AdStatsStream(NextdoorStream):
     zoned_datetime_fields = ()
 
     schema = th.PropertiesList(
-        th.Property("ad_id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
-        th.Property("start_time", th.DateTimeType),
-        th.Property("end_time", th.DateTimeType),
+        th.Property(
+            "ad_id",
+            th.StringType,
+            required=True,
+            description="Ad these metrics are for",
+        ),
+        th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
+        th.Property(
+            "start_time", th.DateTimeType, description="Start of the reporting window"
+        ),
+        th.Property(
+            "end_time",
+            th.DateTimeType,
+            description="End of the reporting window, inclusive",
+        ),
         # Money fields are currency-prefixed strings, e.g. "GBP 12.50".
-        th.Property("billable_spend", th.StringType),
-        th.Property("cpc", th.StringType),
-        th.Property("cpm", th.StringType),
-        th.Property("cost_per_result", th.StringType),
-        th.Property("impressions", th.IntegerType),
-        th.Property("clicks", th.IntegerType),
-        th.Property("ctr", th.NumberType),
-        th.Property("result", th.NumberType),
-        th.Property("total_conversions", th.IntegerType),
-        # Conversion breakdown, returned live but undocumented.
-        th.Property("purchase_conversions", th.IntegerType),
-        th.Property("lead_conversions", th.IntegerType),
-        th.Property("sign_up_conversions", th.IntegerType),
-        th.Property("add_to_cart_conversions", th.IntegerType),
-        th.Property("initiate_checkout_conversions", th.IntegerType),
-        th.Property("search_conversions", th.IntegerType),
-        th.Property("view_content_conversions", th.IntegerType),
-        th.Property("add_to_wishlist_conversions", th.IntegerType),
-        th.Property("subscribe_conversions", th.IntegerType),
-        th.Property("other_conversions", th.IntegerType),
+        th.Property(
+            "billable_spend",
+            th.StringType,
+            description='Billable spend, currency-prefixed, e.g. "GBP 12.50"',
+        ),
+        th.Property(
+            "cpc", th.StringType, description="Cost per click, currency-prefixed"
+        ),
+        th.Property(
+            "cpm",
+            th.StringType,
+            description="Cost per thousand impressions, currency-prefixed",
+        ),
+        th.Property(
+            "cost_per_result",
+            th.StringType,
+            description="Cost per result, currency-prefixed",
+        ),
+        th.Property("impressions", th.IntegerType, description="Impressions served"),
+        th.Property("clicks", th.IntegerType, description="Clicks received"),
+        th.Property(
+            "ctr", th.NumberType, description="Click-through rate as a fraction"
+        ),
+        th.Property(
+            "result",
+            th.NumberType,
+            description="Results against the campaign objective",
+        ),
+        th.Property(
+            "total_conversions",
+            th.IntegerType,
+            description="All conversions, summing the breakdown below",
+        ),
+        # Conversion breakdown, returned live but undocumented. Each counts
+        # conversions of that Nextdoor pixel event type.
+        th.Property(
+            "purchase_conversions", th.IntegerType, description="Purchase conversions"
+        ),
+        th.Property("lead_conversions", th.IntegerType, description="Lead conversions"),
+        th.Property(
+            "sign_up_conversions", th.IntegerType, description="Sign-up conversions"
+        ),
+        th.Property(
+            "add_to_cart_conversions",
+            th.IntegerType,
+            description="Add-to-cart conversions",
+        ),
+        th.Property(
+            "initiate_checkout_conversions",
+            th.IntegerType,
+            description="Checkout-initiated conversions",
+        ),
+        th.Property(
+            "search_conversions", th.IntegerType, description="Search conversions"
+        ),
+        th.Property(
+            "view_content_conversions",
+            th.IntegerType,
+            description="View-content conversions",
+        ),
+        th.Property(
+            "add_to_wishlist_conversions",
+            th.IntegerType,
+            description="Add-to-wishlist conversions",
+        ),
+        th.Property(
+            "subscribe_conversions",
+            th.IntegerType,
+            description="Subscribe conversions",
+        ),
+        th.Property(
+            "other_conversions",
+            th.IntegerType,
+            description="Conversions not in the categories above",
+        ),
         additional_properties=True,
     ).to_dict()
 
@@ -480,19 +722,9 @@ class AdStatsStream(NextdoorStream):
         context = context or {}
         return {
             "advertiser_id": context["advertiser_id"],
-            "start_time": self._window_date("start_date").isoformat(),
-            "end_time": self._window_date("end_date").isoformat(),
+            "start_time": self.window_date("start_date").isoformat(),
+            "end_time": self.window_date("end_date").isoformat(),
         }
-
-    def _window_date(self, setting: str) -> date:
-        """Return a config date as a ``LocalDate``, defaulting to today.
-
-        ``get_starting_timestamp()`` is not usable here: this stream has no
-        replication key, so it would always return None.
-        """
-        if value := self.config.get(setting):
-            return datetime.fromisoformat(value).date()
-        return datetime.now(tz=timezone.utc).date()
 
     def post_process(self, row: dict, context: Context | None = None) -> dict | None:
         """Stamp the ad and advertiser ids onto the metrics row."""
@@ -518,18 +750,28 @@ class CustomAudienceStream(NextdoorStream):
     state_partitioning_keys = ("advertiser_id", "adgroup_id")
 
     schema = th.PropertiesList(
-        th.Property("id", th.StringType, required=True),
-        th.Property("advertiser_id", th.StringType),
+        th.Property(
+            "id", th.StringType, required=True, description="Custom audience ID"
+        ),
+        th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
         th.Property(
             "adgroup_id",
             th.StringType,
             description="The ad group this audience was discovered from",
         ),
-        th.Property("name", th.StringType),
-        th.Property("description", th.StringType),
-        th.Property("audience_type", th.StringType),
-        th.Property("created_at", th.DateTimeType),
-        th.Property("updated_at", th.DateTimeType),
+        th.Property("name", th.StringType, description="Audience name"),
+        th.Property("description", th.StringType, description="Advertiser's own notes"),
+        th.Property(
+            "audience_type",
+            th.StringType,
+            description="How the audience was built, e.g. emails",
+        ),
+        th.Property("created_at", th.DateTimeType, description="When it was created"),
+        th.Property(
+            "updated_at",
+            th.DateTimeType,
+            description="When it was last modified; replication key",
+        ),
     ).to_dict()
 
     def get_new_paginator(self) -> SinglePagePaginator:
@@ -596,12 +838,34 @@ _METRIC_TYPES: dict[str, t.Any] = {
     **dict.fromkeys(_INTEGER_METRICS, th.IntegerType),
 }
 
-#: Column added to the report for each requested dimension granularity.
+#: Column added to the report for each requested dimension granularity,
+#: with the description attached to it in the generated schema.
 _DIMENSION_COLUMNS = {
-    "CAMPAIGN": ("campaign_id", "campaign_name"),
-    "AD_GROUP": ("adgroup_id", "adgroup_name"),
-    "AD": ("ad_id", "ad_name"),
-    "PLACEMENT": ("placement",),
+    "CAMPAIGN": (
+        ("campaign_id", "Campaign ID; joins to the campaigns stream"),
+        ("campaign_name", "Campaign name"),
+    ),
+    "AD_GROUP": (
+        ("adgroup_id", "Ad group ID; joins to the ad_groups stream"),
+        ("adgroup_name", "Ad group name"),
+    ),
+    "AD": (
+        ("ad_id", "Ad ID; joins to the ads stream"),
+        ("ad_name", "Ad name"),
+    ),
+    "PLACEMENT": (("placement", "Placement the metrics are attributed to"),),
+}
+
+#: Description per report metric.
+_METRIC_DESCRIPTIONS = {
+    "IMPRESSIONS": "Impressions served",
+    "CLICKS": "Clicks received",
+    "CTR": "Click-through rate as a fraction",
+    "SPEND": 'Spend, currency-prefixed, e.g. "GBP 12.50"',
+    "BILLABLE_SPEND": "Billable spend, currency-prefixed",
+    "CPM": "Cost per thousand impressions, currency-prefixed",
+    "CPC": "Cost per click, currency-prefixed",
+    "CONVERSIONS": "Conversions attributed in the window",
 }
 #: Id column per dimension, used to build the primary key.
 _DIMENSION_KEYS = {
@@ -690,22 +954,43 @@ class AdPerformanceReportStream(NextdoorStream):
     def _build_schema(report: dict[str, t.Any]) -> dict:
         """Build the schema from the requested dimensions and metrics."""
         properties = [
-            th.Property("advertiser_id", th.StringType, required=True),
-            th.Property("report_id", th.StringType),
-            th.Property("date", th.StringType, description="The report time bucket"),
+            th.Property(
+                "advertiser_id",
+                th.StringType,
+                required=True,
+                description="Advertiser the report was generated for",
+            ),
+            th.Property(
+                "report_id",
+                th.StringType,
+                description="ID of the generated report; joins to the reports stream",
+            ),
+            th.Property(
+                "date",
+                th.StringType,
+                description=(
+                    "The report time bucket, at the configured time_granularity"
+                ),
+            ),
         ]
 
         for dimension in report["dimension_granularity"]:
             properties.extend(
-                th.Property(column, th.StringType)
-                for column in _DIMENSION_COLUMNS[dimension]
+                th.Property(column, th.StringType, description=description)
+                for column, description in _DIMENSION_COLUMNS[dimension]
             )
 
         for metric in report["metrics"]:
             # Money comes back currency-prefixed ("GBP 12.50"), so it stays a
             # string; CTR and any future ratio metric is a float.
             metric_type: t.Any = _METRIC_TYPES.get(metric, th.NumberType)
-            properties.append(th.Property(metric.lower(), metric_type))
+            properties.append(
+                th.Property(
+                    metric.lower(),
+                    metric_type,
+                    description=_METRIC_DESCRIPTIONS.get(metric),
+                )
+            )
 
         return th.PropertiesList(*properties, additional_properties=True).to_dict()
 
@@ -723,19 +1008,13 @@ class AdPerformanceReportStream(NextdoorStream):
             "dimension_granularity": report["dimension_granularity"],
             "time_granularity": report["time_granularity"],
             "metrics": report["metrics"],
-            "start_time": self._window_date("start_date").isoformat(),
-            "end_time": self._window_date("end_date").isoformat(),
+            "start_time": self.window_date("start_date").isoformat(),
+            "end_time": self.window_date("end_date").isoformat(),
         }
         for key in ("campaign_ids", "adgroup_ids", "ad_ids"):
             if report[key]:
                 payload[key] = report[key]
         return payload
-
-    def _window_date(self, setting: str) -> date:
-        """Return a config date as a ``LocalDate``, defaulting to today."""
-        if value := self.config.get(setting):
-            return datetime.fromisoformat(value).date()
-        return datetime.now(tz=timezone.utc).date()
 
     def get_new_paginator(self) -> SinglePagePaginator:
         """Return a single-page paginator - one report per request."""

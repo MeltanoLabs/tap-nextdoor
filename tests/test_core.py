@@ -7,11 +7,14 @@ rather than against the real API.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from tap_nextdoor.tap import TapNextdoor
+
+if TYPE_CHECKING:
+    from tap_nextdoor.client import NextdoorStream
 
 EXPECTED_PAGES = 2
 
@@ -288,3 +291,47 @@ def test_report_primary_key_follows_dimensions(config: dict) -> None:
         "campaign_id",
         "adgroup_id",
     )
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("2026-01-01T00:00:00Z", "2026-01-01"),
+        ("2026-01-01t00:00:00z", "2026-01-01"),
+        ("2026-01-01", "2026-01-01"),
+        ("2026-01-01T23:30:00+01:00", "2026-01-01"),
+        ("2026-01-01T00:00:00", "2026-01-01"),
+    ],
+)
+def test_start_date_accepts_iso8601_date_times(
+    config: dict,
+    nam_api,
+    configured: str,
+    expected: str,
+) -> None:
+    """start_date accepts a full ISO-8601 date-time, not just a date.
+
+    The "Z" suffix matters: datetime.fromisoformat only accepts it from
+    Python 3.11, and this package supports 3.10.
+    """
+    config["start_date"] = configured
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    tap.streams["advertisers"].sync()
+
+    body = next(
+        r.json()
+        for r in nam_api.request_history
+        if r.path == "/v2/api/reporting/create"
+    )
+    assert body["start_time"] == expected
+
+
+def test_unparseable_start_date_is_rejected_clearly(config: dict, nam_api) -> None:  # noqa: ARG001
+    """A malformed date names the accepted formats rather than raising raw."""
+    config["start_date"] = "01/01/2026"
+    stream = cast(
+        "NextdoorStream",
+        TapNextdoor(config=config, parse_env_config=False).streams["ad_stats"],
+    )
+    with pytest.raises(ValueError, match="ISO-8601 date or date-time"):
+        stream.window_date("start_date")

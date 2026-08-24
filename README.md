@@ -2,6 +2,12 @@
 
 A [Singer](https://singer.io) tap for the Nextdoor Ads Manager (NAM) API, built with the [Meltano Singer SDK](https://sdk.meltano.com).
 
+## About Nextdoor Ads
+
+[Nextdoor](https://nextdoor.com) is a neighbourhood social network. **Nextdoor Ads Manager (NAM)** is its self-serve advertising platform, where businesses run geographically targeted campaigns aimed at specific neighbourhoods, postal codes or radii, and measure them with the Nextdoor conversion pixel.
+
+The **Ads API** exposes the NAM objects an advertiser manages - advertisers, campaigns, ad groups, ads, creatives, custom audiences - plus performance reporting. This tap extracts that data. Some NAM actions remain UI-only (initial sign-up, payment methods, adding or archiving custom audiences, archiving media assets), so they cannot be extracted or automated.
+
 Built against the [Nextdoor Ads API reference](https://developer.nextdoor.com/reference/advertising-introduction). Base URL: `https://ads.nextdoor.com/v2/api`.
 
 ## API notes
@@ -34,19 +40,31 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 
 ## Streams
 
-| Stream | Endpoint | Parent | Replication |
-|---|---|---|---|
-| `users` | `GET /me` | - | FULL_TABLE |
-| `profiles` | `GET /me` | - | FULL_TABLE |
-| `advertisers` | `GET /me` (`user.advertisers_with_access`) | - | FULL_TABLE |
-| `campaigns` | `GET /advertiser/campaign/list` | `advertisers` | `updated_at` |
-| `ad_groups` | `GET /adgroup/list` | `campaigns` | `updated_at` |
-| `ads` | `GET /ad/list` | `ad_groups` | `updated_at` |
-| `creatives` | `GET /advertiser/creative/list` | `advertisers` | `updated_at` |
-| `reports` | `GET /advertiser/reporting/list` | `advertisers` | FULL_TABLE |
-| `ad_stats` | `GET /ad/get/{id}/stats` | `ads` | FULL_TABLE |
-| `ad_performance_reports` | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
-| `custom_audiences` | `GET /custom_audience/get/{id}` | `ad_groups` | `updated_at` |
+| Stream | Description | Endpoint | Parent | Replication |
+|---|---|---|---|---|
+| `users` | The NAM user that owns the access token, and which advertisers they can reach | `GET /me` | - | FULL_TABLE |
+| `profiles` | The advertising profile behind the token, including its billing profile and whether it is an agency | `GET /me` | - | FULL_TABLE |
+| `advertisers` | Advertiser accounts the token can access, with the token holder's role on each | `GET /me` (`user.advertisers_with_access`) | - | FULL_TABLE |
+| `campaigns` | Campaigns, with objective, status and flight dates | `GET /advertiser/campaign/list` | `advertisers` | `updated_at` |
+| `ad_groups` | Ad groups, carrying the bid, budget, placements, frequency caps and all targeting | `GET /adgroup/list` | `campaigns` | `updated_at` |
+| `ads` | Individual ads, linking an ad group to the creative it renders | `GET /ad/list` | `ad_groups` | `updated_at` |
+| `creatives` | Creative assets - headline, body, CTA, image and logo URLs, click and impression trackers | `GET /advertiser/creative/list` | `advertisers` | `updated_at` |
+| `reports` | Saved and scheduled report definitions with their CSV download URLs. Definitions only, no metrics | `GET /advertiser/reporting/list` | `advertisers` | FULL_TABLE |
+| `ad_stats` | Aggregate performance per ad for the configured window - spend, impressions, clicks, CTR, CPC, CPM and a conversion breakdown | `GET /ad/get/{id}/stats` | `ads` | FULL_TABLE |
+| `ad_performance_reports` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions and time buckets. **Creates a report in the account and emails it** | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
+| `custom_audiences` | Custom audiences referenced by ad groups, with their type and description | `GET /custom_audience/get/{id}` | `ad_groups` | `updated_at` |
+
+### Stream fields
+
+Every field in every stream carries a description in its JSON schema, so the field documentation travels with the catalog rather than drifting from this README:
+
+```bash
+uv run tap-nextdoor --config=ENV --discover \
+  | jq '.streams[] | select(.tap_stream_id=="campaigns") | .schema.properties
+        | to_entries | map({field: .key, type: .value.type, description: .value.description})'
+```
+
+`ad_performance_reports` is the exception in that its schema is generated from your `report` config, so its fields depend on the metrics and dimensions you request - but those are described too.
 
 ### Notes on specific streams
 
@@ -122,9 +140,77 @@ This Singer tap will automatically import any environment variables within the w
 `.env` if the `--config=ENV` is provided, such that config values will be considered if a matching
 environment variable is set either in the terminal context or in the `.env` file.
 
-### Source Authentication and Authorization
+### Setup
 
-Access is granted via the [Ads and Conversion API Request Form](https://forms.gle/bbCSGUEuvrfxj3U58). Once approved, generate an access token in Nextdoor Ads Manager at https://ads.nextdoor.com/v2/manage/api. The tap sends it as `Authorization: Bearer <token>`.
+Getting from nothing to a running sync:
+
+1. **Request API access.** Submit the [Ads and Conversion API Request Form](https://forms.gle/bbCSGUEuvrfxj3U58). Access is granted per advertiser account and approval is not instant, so start here.
+1. **Generate an access token.** Once approved, sign in to Nextdoor Ads Manager and go to <https://ads.nextdoor.com/v2/manage/api>. Generate a token and copy it - it is shown once.
+1. **Set the token.** Put it in `TAP_NEXTDOOR_ACCESS_TOKEN` (see `.env.example`) or a `config.json`. Never commit it.
+1. **Confirm the token works and find your advertiser IDs.**
+   ```bash
+   uv run tap-nextdoor --config=ENV --discover > catalog.json   # validates auth
+   ```
+   The `users` stream (`GET /me`) reports every advertiser the token can reach. Sync it alone to list them:
+   ```bash
+   uv run tap-nextdoor --config=ENV --catalog catalog.json | grep '"stream":"advertisers"'
+   ```
+1. **Narrow the scope (recommended).** Set `advertiser_ids` to just the accounts you want. Left empty, the tap syncs every advertiser the token can see, which multiplies runtime.
+1. **Set the reporting window.** `start_date` and `end_date` bound `ad_performance_reports` and `ad_stats`. Both default to today, i.e. no history.
+1. **Run it.**
+   ```bash
+   meltano run tap-nextdoor target-jsonl
+   ```
+
+### Security prerequisites
+
+**Required permissions.** The access token inherits the permissions of the NAM user who generated it. That user needs a role granting access to each advertiser you intend to extract; roles appear on the `advertisers` stream as `role` (e.g. `CLIENT_ADMIN`). If an advertiser is missing from `advertisers`, the token has no access to it and no amount of configuration will surface its data - the fix is a NAM permission change, not a tap setting.
+
+**Least privilege.** The Ads API has no read-only scope: the token is a bearer credential with the same reach as the user in the UI, and the same token that reads campaigns can also create them. Generate it from a user with access to only the advertisers being extracted.
+
+**Handling the token.**
+
+- It is long-lived, with no refresh flow. Treat it as a standing secret, rotate it on a schedule, and revoke it at <https://ads.nextdoor.com/v2/manage/api> if exposed.
+- It is sent as `Authorization: Bearer <token>` over HTTPS on every request.
+- Store it in a secrets manager or `.env` (gitignored), never in `meltano.yml`.
+
+**Sensitive output.** Two things worth knowing before loading this into a shared warehouse:
+
+- The `reports` stream's `download_url` is a presigned S3 URL with embedded AWS credentials. Short-lived, but a credential in a data column - consider deselecting the stream or masking the field.
+- `users` and `profiles` carry personal data (name, email). Deselect them if you do not need them.
+
+**Write access.** `ad_performance_reports` is the only stream that writes: it creates a report in the advertiser's account and emails it to `recipient_emails`. See its section above.
+
+## Data recovery and backfill
+
+**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`. The reporting streams (`ad_performance_reports`, `ad_stats`) and the `/me`-derived streams are full-table and re-extract their whole window every run.
+
+**Backfilling reporting data.** Widen the window and re-run; no state changes are needed, since these streams are full-table:
+
+```bash
+TAP_NEXTDOOR_START_DATE=2025-01-01T00:00:00Z \
+TAP_NEXTDOOR_END_DATE=2025-12-31T00:00:00Z \
+  meltano run tap-nextdoor target-jsonl
+```
+
+Cost scales with the window and the number of ads, so backfill in chunks (a month at a time) rather than one multi-year run. `ad_stats` in particular issues **one request per ad**.
+
+**Recovering the incremental streams.** These are keyed on `updated_at`, so a full re-extract means clearing the bookmark:
+
+```bash
+# inspect
+meltano state get dev:tap-nextdoor-to-target-jsonl
+
+# reset one stream
+meltano state clear dev:tap-nextdoor-to-target-jsonl --stream campaigns
+
+# or reset everything
+meltano state clear dev:tap-nextdoor-to-target-jsonl
+```
+
+Without Meltano, drop the affected stream from the `--state` file (or pass no state) and re-run.
+
+**A caveat.** The API exposes no deletion or archival feed. Objects archived in NAM keep a `status` of `ARCHIVED` and are still returned, but anything hard-deleted simply stops appearing, and an incremental run will not tell the target it is gone. Periodically re-run without state if you need the destination to converge.
 
 ## Usage
 

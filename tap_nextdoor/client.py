@@ -17,6 +17,7 @@ Two API traits shape this module:
 from __future__ import annotations
 
 import typing as t
+from datetime import date, datetime, timezone
 from functools import cached_property
 
 from singer_sdk.helpers.jsonpath import extract_jsonpath
@@ -30,6 +31,38 @@ if t.TYPE_CHECKING:
     from singer_sdk.helpers.types import Auth, Context
 
 DEFAULT_PAGE_SIZE = 100
+
+
+def as_local_date(value: str) -> date:
+    """Parse an ISO-8601 date or date-time into a ``LocalDate``.
+
+    The NAM reporting endpoints take ``LocalDate`` values ("2026-01-01"), but
+    the ``start_date``/``end_date`` settings accept a full ISO-8601 date-time
+    ("2026-01-01T00:00:00Z") so they behave like every other Singer tap.
+
+    ``datetime.fromisoformat`` only learned to parse a trailing "Z" in Python
+    3.11, and this package supports 3.10, so the offset is normalised first.
+
+    Args:
+        value: An ISO-8601 date or date-time string.
+
+    Returns:
+        The corresponding date.
+
+    Raises:
+        ValueError: If the value is not valid ISO-8601.
+    """
+    normalised = value.strip()
+    if normalised.endswith(("Z", "z")):
+        normalised = f"{normalised[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(normalised).date()
+    except ValueError as exc:  # pragma: no cover - message clarity only
+        msg = (
+            f"Could not parse {value!r} as an ISO-8601 date or date-time "
+            f"(e.g. 2026-01-01 or 2026-01-01T00:00:00Z)."
+        )
+        raise ValueError(msg) from exc
 
 
 class NextdoorPaginator(BaseAPIPaginator["str | None"]):
@@ -100,6 +133,23 @@ class NextdoorStream(RESTStream):
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+    def window_date(self, setting: str) -> date:
+        """Return the ``start_date``/``end_date`` setting as a ``LocalDate``.
+
+        Defaults to today when unset. ``get_starting_timestamp()`` is not
+        usable for this: the reporting streams have no replication key, so it
+        would always return None.
+
+        Args:
+            setting: The config setting name to read.
+
+        Returns:
+            The configured date, or today.
+        """
+        if value := self.config.get(setting):
+            return as_local_date(value)
+        return datetime.now(tz=timezone.utc).date()
 
     def get_new_paginator(self) -> BaseAPIPaginator:
         """Create a new pagination helper instance.

@@ -54,21 +54,24 @@ class TapNextdoor(Tap):
         ),
         th.Property(
             "start_date",
-            th.DateType,
+            th.DateTimeType,
             title="Start Date",
             description=(
-                "Start of the reporting window for the "
-                "ad_performance_reports stream (a LocalDate, e.g. 2024-01-01). "
+                "Start of the reporting window for the ad_performance_reports "
+                "and ad_stats streams. Accepts an ISO-8601 date-time "
+                "(2026-01-01T00:00:00Z) or a plain date (2026-01-01); the API "
+                "takes whole days, so any time component is truncated. "
                 "Defaults to today."
             ),
         ),
         th.Property(
             "end_date",
-            th.DateType,
+            th.DateTimeType,
             title="End Date",
             description=(
-                "End of the reporting window for the ad_performance_reports "
-                "stream, inclusive. Defaults to today."
+                "End of the reporting window, inclusive. Accepts an ISO-8601 "
+                "date-time (2026-01-31T23:59:59Z) or a plain date "
+                "(2026-01-31). Defaults to today."
             ),
         ),
         th.Property(
