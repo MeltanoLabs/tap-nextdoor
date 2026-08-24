@@ -1017,8 +1017,13 @@ class AdPerformanceReportStream(NextdoorStream):
             "dimension_granularity": report["dimension_granularity"],
             "time_granularity": report["time_granularity"],
             "metrics": report["metrics"],
-            "start_time": self.window_date("start_date").isoformat(),
-            "end_time": self.window_date("end_date").isoformat(),
+            # This endpoint needs an offset-bearing date-time, unlike the
+            # /stats endpoints which take a plain LocalDate. `end_date` is
+            # documented as inclusive, and existing reports run midnight to
+            # midnight (a one-day report spans 00:00 to the next 00:00), so
+            # the upper bound is advanced by a day to match.
+            "start_time": self.window_datetime("start_date"),
+            "end_time": self.window_datetime("end_date", plus_days=1),
         }
         for key in ("campaign_ids", "adgroup_ids", "ad_ids"):
             if report[key]:

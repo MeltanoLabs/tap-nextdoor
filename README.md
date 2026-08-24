@@ -108,6 +108,19 @@ config:
 
 All three enum lists are validated against the documented values before any request is made, so a typo fails with the supported values listed rather than a bare 400.
 
+### The reporting window is a date-time here, not a date
+
+`POST /reporting/create` and the `/{entity}/get/{id}/stats` endpoints disagree about time formats, and the reference docs describe both as `LocalDate`:
+
+| Endpoint | Accepts | Rejects |
+|---|---|---|
+| `/{entity}/get/{id}/stats` | `2026-07-01` | - |
+| `/reporting/create` | `2026-07-01T00:00:00Z`, `+00:00`, `+01:00[Europe/London]` | `2026-07-01` (*parsed at index 10*), `2026-07-01T00:00:00` (*index 19*) |
+
+An offset is mandatory for `reporting/create`. The tap sends the right form to each, so `start_date`/`end_date` behave the same to you regardless of stream.
+
+`end_date` is documented as inclusive, and existing reports run midnight to midnight (a one-day report spans `00:00` to the next `00:00`), so the tap advances the upper bound by one day when calling `reporting/create`. That inference comes from the sampled reports, not from documentation.
+
 The **schema and primary key are derived from the config**: one column per requested dimension (`AD` -> `ad_id`, `ad_name`), one per requested metric, plus `advertiser_id`, `report_id` and `date`. The key is `advertiser_id` + `date` + the id column of each requested dimension. Money metrics (`SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`) are typed as strings, since the API returns them currency-prefixed; `IMPRESSIONS`/`CLICKS`/`CONVERSIONS` are cast to integers and `CTR` to a float.
 
 The CSV header row is not documented anywhere. It was instead determined empirically, by downloading 48 existing report CSVs from a live account (a read-only operation - the `reports` stream already exposes their download URLs) and collecting the distinct header shapes:

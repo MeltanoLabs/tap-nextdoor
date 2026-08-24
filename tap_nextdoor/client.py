@@ -17,7 +17,7 @@ Two API traits shape this module:
 from __future__ import annotations
 
 import typing as t
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import cached_property
 
 from singer_sdk.helpers.jsonpath import extract_jsonpath
@@ -150,6 +150,40 @@ class NextdoorStream(RESTStream):
         if value := self.config.get(setting):
             return as_local_date(value)
         return datetime.now(tz=timezone.utc).date()
+
+    def window_datetime(self, setting: str, *, plus_days: int = 0) -> str:
+        """Return a window setting as an offset-bearing ISO-8601 date-time.
+
+        ``POST /reporting/create`` rejects a bare date: "2026-07-01" fails with
+        *could not be parsed at index 10*, and "2026-07-01T00:00:00" fails at
+        index 19, so an offset is mandatory. (The ``/{entity}/get/{id}/stats``
+        endpoints are the opposite - they take a plain ``LocalDate`` - which is
+        why :meth:`window_date` exists alongside this.)
+
+        A date-only setting is read as midnight UTC. A configured date-time is
+        preserved, defaulting to UTC when it carries no offset of its own.
+
+        Args:
+            setting: The config setting name to read.
+            plus_days: Days to add, used to turn an inclusive end date into the
+                API's exclusive upper bound.
+
+        Returns:
+            An ISO-8601 date-time string including a UTC offset.
+        """
+        value = self.config.get(setting)
+        if value:
+            normalised = value.strip()
+            if normalised.endswith(("Z", "z")):
+                normalised = f"{normalised[:-1]}+00:00"
+            moment = datetime.fromisoformat(normalised)
+        else:
+            today = datetime.now(tz=timezone.utc).date()
+            moment = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return (moment + timedelta(days=plus_days)).isoformat()
 
     def get_new_paginator(self) -> BaseAPIPaginator:
         """Create a new pagination helper instance.

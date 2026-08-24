@@ -232,8 +232,10 @@ def test_report_definition_comes_from_config(config: dict, nam_api) -> None:
         "dimension_granularity": ["CAMPAIGN", "AD"],
         "time_granularity": ["DAY"],
         "metrics": ["IMPRESSIONS", "CLICKS", "SPEND"],
-        "start_time": "2025-01-01",
-        "end_time": "2025-01-31",
+        # Offset-bearing date-times, and an exclusive upper bound one day
+        # past the inclusive end_date setting.
+        "start_time": "2025-01-01T00:00:00+00:00",
+        "end_time": "2025-02-01T00:00:00+00:00",
         "campaign_ids": ["camp1"],
     }
 
@@ -323,8 +325,10 @@ def test_start_date_accepts_iso8601_date_times(
 ) -> None:
     """start_date accepts a full ISO-8601 date-time, not just a date.
 
-    The "Z" suffix matters: datetime.fromisoformat only accepts it from
-    Python 3.11, and this package supports 3.10.
+    Asserted against the /stats endpoint, which takes a LocalDate and so
+    truncates any time component. The "Z" suffix matters:
+    datetime.fromisoformat only accepts it from Python 3.11, and this package
+    supports 3.10.
     """
     config["start_date"] = configured
     tap = TapNextdoor(config=config, parse_env_config=False)
@@ -333,7 +337,7 @@ def test_start_date_accepts_iso8601_date_times(
     body = next(
         r.json()
         for r in nam_api.request_history
-        if r.path == "/v2/api/reporting/create"
+        if r.path.endswith("/ad/get/ad1/stats")
     )
     assert body["start_time"] == expected
 
@@ -376,3 +380,36 @@ def test_report_uses_the_csv_ad_group_column_name(config: dict, nam_api) -> None
     ]
     assert "ad_group_id" in stream.schema["properties"]
     assert "adgroup_id" not in stream.schema["properties"]
+
+
+def test_report_window_is_an_offset_bearing_datetime(config: dict, nam_api) -> None:
+    """reporting/create rejects bare dates, so the window must carry an offset.
+
+    Verified against the live API: "2026-07-01" fails with "could not be
+    parsed at index 10" and "2026-07-01T00:00:00" fails at index 19.
+    """
+    config["start_date"] = "2026-07-01"
+    config["end_date"] = "2026-07-31"
+    TapNextdoor(config=config, parse_env_config=False).streams["advertisers"].sync()
+
+    body = next(
+        r.json()
+        for r in nam_api.request_history
+        if r.path == "/v2/api/reporting/create"
+    )
+    assert body["start_time"] == "2026-07-01T00:00:00+00:00"
+    # end_date is inclusive, so the exclusive upper bound is the next day.
+    assert body["end_time"] == "2026-08-01T00:00:00+00:00"
+
+
+def test_ad_stats_still_uses_plain_local_dates(config: dict, nam_api) -> None:
+    """The /stats endpoints take a LocalDate, unlike reporting/create."""
+    TapNextdoor(config=config, parse_env_config=False).streams["advertisers"].sync()
+
+    stats = next(
+        r.json()
+        for r in nam_api.request_history
+        if r.path.endswith("/ad/get/ad1/stats")
+    )
+    assert stats["start_time"] == "2025-01-01"
+    assert stats["end_time"] == "2025-01-31"
