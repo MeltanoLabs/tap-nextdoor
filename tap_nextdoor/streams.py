@@ -835,43 +835,55 @@ _INTEGER_METRICS = frozenset({"IMPRESSIONS", "CLICKS", "CONVERSIONS"})
 #: ("26.87"), so money is numeric here. Anything unlisted is a number.
 _METRIC_TYPES: dict[str, t.Any] = dict.fromkeys(_INTEGER_METRICS, th.IntegerType)
 
-#: Column added to the report for each requested dimension granularity,
-#: with the description attached to it in the generated schema.
+#: Column added to the report for each requested dimension granularity, with
+#: the description attached to it in the generated schema. Determined from live
+#: reports: the CSV carries *names only*, no IDs, for every dimension.
 _DIMENSION_COLUMNS = {
-    "CAMPAIGN": (
-        ("campaign_id", "Campaign ID; joins to the campaigns stream"),
-        ("campaign_name", "Campaign name"),
-    ),
-    "AD_GROUP": (
-        # The CSV uses ad_group_id; the JSON endpoints use adgroup_id.
-        ("ad_group_id", "Ad group ID; joins to the ad_groups stream"),
-        ("ad_group_name", "Ad group name"),
-    ),
-    "AD": (
-        ("ad_id", "Ad ID; joins to the ads stream"),
-        ("ad_name", "Ad name"),
-    ),
+    "CAMPAIGN": (("campaign_name", "Campaign name; no campaign ID is reported"),),
+    "AD_GROUP": (("ad_group_name", "Ad group name; no ad group ID is reported"),),
+    "AD": (("ad_name", "Ad name; no ad ID is reported"),),
     "PLACEMENT": (("placement", "Placement the metrics are attributed to"),),
+}
+
+#: Column that identifies each dimension, used to build the primary key. Names
+#: are all the API gives us here.
+_DIMENSION_KEYS = {
+    "CAMPAIGN": "campaign_name",
+    "AD_GROUP": "ad_group_name",
+    "AD": "ad_name",
+    "PLACEMENT": "placement",
+}
+
+#: CSV column each metric arrives in, after header normalisation. Most are just
+#: the lowercased enum, but SPEND and CONVERSIONS are not.
+_METRIC_COLUMNS = {
+    "IMPRESSIONS": "impressions",
+    "CLICKS": "clicks",
+    "CTR": "ctr",
+    "SPEND": "gross_spend",
+    "BILLABLE_SPEND": "billable_spend",
+    "CPM": "cpm",
+    "CPC": "cpc",
+    "CONVERSIONS": "total_conversions",
 }
 
 #: Description per report metric.
 _METRIC_DESCRIPTIONS = {
     "IMPRESSIONS": "Impressions served",
     "CLICKS": "Clicks received",
-    "CTR": "Click-through rate as a fraction",
-    "SPEND": "Spend for the row, as a bare decimal in the account currency",
+    "CTR": (
+        "Click-through rate as a fraction. The CSV reports a percentage "
+        'string ("1.05%"); the tap converts it so it matches ad_stats.ctr.'
+    ),
+    "SPEND": "Gross spend, as a bare decimal in the account currency",
     "BILLABLE_SPEND": "Billable spend, as a bare decimal",
     "CPM": "Cost per thousand impressions, as a bare decimal",
     "CPC": "Cost per click, as a bare decimal",
-    "CONVERSIONS": "Conversions attributed in the window",
+    "CONVERSIONS": "Total conversions attributed in the window",
 }
-#: Id column per dimension, used to build the primary key.
-_DIMENSION_KEYS = {
-    "CAMPAIGN": "campaign_id",
-    "AD_GROUP": "ad_group_id",
-    "AD": "ad_id",
-    "PLACEMENT": "placement",
-}
+
+#: Metrics arriving as a percentage string, converted to a fraction.
+_PERCENT_METRICS = frozenset({"CTR"})
 
 
 class AdPerformanceReportStream(NextdoorStream):
@@ -911,7 +923,7 @@ class AdPerformanceReportStream(NextdoorStream):
         self._report = self._validated_report(tap.config.get("report") or {})
         super().__init__(tap=tap, schema=self._build_schema(self._report), **kwargs)
         keys = [_DIMENSION_KEYS[d] for d in self._report["dimension_granularity"]]
-        self._primary_keys = ("advertiser_id", "start_time", *keys)
+        self._primary_keys = ("advertiser_id", "date", *keys)
 
     @property
     def report_config(self) -> dict[str, t.Any]:
@@ -964,21 +976,10 @@ class AdPerformanceReportStream(NextdoorStream):
                 description="ID of the generated report; joins to the reports stream",
             ),
             th.Property(
-                "start_time",
-                th.StringType,
+                "date",
+                th.DateType,
                 description=(
-                    "Start of the row's time bucket, at the configured "
-                    "time_granularity. Kept as a string: the CSV emits either "
-                    '"2025-09-30" or "2025-09-06 12:00 AM" depending on the '
-                    "report, neither of which is RFC 3339."
-                ),
-            ),
-            th.Property(
-                "end_time",
-                th.StringType,
-                description=(
-                    "End of the row's time bucket. Only present on reports "
-                    "that span a range."
+                    "The row's time bucket, at the configured time_granularity"
                 ),
             ),
         ]
@@ -990,12 +991,10 @@ class AdPerformanceReportStream(NextdoorStream):
             )
 
         for metric in report["metrics"]:
-            # Money comes back currency-prefixed ("GBP 12.50"), so it stays a
-            # string; CTR and any future ratio metric is a float.
             metric_type: t.Any = _METRIC_TYPES.get(metric, th.NumberType)
             properties.append(
                 th.Property(
-                    metric.lower(),
+                    _METRIC_COLUMNS.get(metric, metric.lower()),
                     metric_type,
                     description=_METRIC_DESCRIPTIONS.get(metric),
                 )
@@ -1078,11 +1077,15 @@ class AdPerformanceReportStream(NextdoorStream):
         row["advertiser_id"] = (context or {})["advertiser_id"]
 
         for metric in self.report_config["metrics"]:
-            column = metric.lower()
+            column = _METRIC_COLUMNS.get(metric, metric.lower())
             value = row.get(column)
             if value in (None, ""):
                 continue
-            row[column] = (
-                int(float(value)) if metric in _INTEGER_METRICS else float(value)
-            )
+            if isinstance(value, str) and metric in _PERCENT_METRICS:
+                # "1.05%" -> 0.0105, matching ad_stats.ctr
+                row[column] = float(value.rstrip("%").strip()) / 100
+            elif metric in _INTEGER_METRICS:
+                row[column] = int(float(value))
+            else:
+                row[column] = float(value)
         return row

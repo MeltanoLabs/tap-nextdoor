@@ -123,6 +123,42 @@ An offset is mandatory for `reporting/create`. The tap sends the right form to e
 
 The **schema and primary key are derived from the config**: one column per requested dimension (`AD` -> `ad_id`, `ad_name`), one per requested metric, plus `advertiser_id`, `report_id` and `date`. The key is `advertiser_id` + `date` + the id column of each requested dimension. Money metrics (`SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`) are typed as strings, since the API returns them currency-prefixed; `IMPRESSIONS`/`CLICKS`/`CONVERSIONS` are cast to integers and `CTR` to a float.
 
+The CSV header row is not documented anywhere. It was determined by creating real reports and reading them back. **The format depends on how the report was created**, which is the trap here:
+
+```
+# created by POST /reporting/create - what this stream receives
+Campaign Name,Ad Group Name,Ad Name,Placement,Date,Impressions,Clicks,CTR,Gross Spend,Billable Spend,CPM,CPC,Total Conversions
+
+# pre-existing scheduled reports in the same account - NOT what this stream gets
+campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,start_time,end_time,clicks,impressions,conversions,spend,billable_spend
+```
+
+Sampling 48 existing reports gives the second shape and is misleading. This stream reads the first. What follows from it:
+
+- Headers are **Title Case with spaces**, so normalisation to snake_case is load-bearing, not a safeguard.
+- **No IDs are reported at all** - only `Campaign Name`, `Ad Group Name`, `Ad Name`. Rows therefore cannot be joined to the `campaigns`/`ad_groups`/`ads` streams by ID, only by name, and the primary key is built from names. Renaming an entity in NAM breaks that join and produces what look like new rows.
+- The time bucket is **`Date`**, not the `start_time`/`end_time` the scheduled reports use.
+- Two metric columns are not their enum name: `SPEND` arrives as **`gross_spend`** and `CONVERSIONS` as **`total_conversions`**.
+- **`CTR` is a percentage string** (`"1.05%"`). The tap divides it by 100 so it matches `ad_stats.ctr`, which is already a fraction. This is the one value the tap rewrites rather than passing through.
+- All other money and rate metrics are bare decimals (`373.36`), unlike the `/stats` endpoint's currency-prefixed `"GBP 0"`.
+
+Verified against a live report of 465 rows: every column is declared, nothing passes through undeclared, and the parsed output validates against the generated schema. Only `dimension_granularity` values `CAMPAIGN`/`AD_GROUP`/`AD`/`PLACEMENT` with `time_granularity: [DAY]` have been observed; the schema still allows additional properties, so an unseen combination passes through rather than being dropped.
+
+### The reporting window is a date-time here, not a date
+
+`POST /reporting/create` and the `/{entity}/get/{id}/stats` endpoints disagree about time formats, and the reference docs describe both as `LocalDate`:
+
+| Endpoint | Accepts | Rejects |
+|---|---|---|
+| `/{entity}/get/{id}/stats` | `2026-07-01` | - |
+| `/reporting/create` | `2026-07-01T00:00:00Z`, `+00:00`, `+01:00[Europe/London]` | `2026-07-01` (*parsed at index 10*), `2026-07-01T00:00:00` (*index 19*) |
+
+An offset is mandatory for `reporting/create`. The tap sends the right form to each, so `start_date`/`end_date` behave the same to you regardless of stream.
+
+`end_date` is documented as inclusive, and existing reports run midnight to midnight (a one-day report spans `00:00` to the next `00:00`), so the tap advances the upper bound by one day when calling `reporting/create`. That inference comes from the sampled reports, not from documentation.
+
+The **schema and primary key are derived from the config**: one column per requested dimension (`AD` -> `ad_id`, `ad_name`), one per requested metric, plus `advertiser_id`, `report_id` and `date`. The key is `advertiser_id` + `date` + the id column of each requested dimension. Money metrics (`SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`) are typed as strings, since the API returns them currency-prefixed; `IMPRESSIONS`/`CLICKS`/`CONVERSIONS` are cast to integers and `CTR` to a float.
+
 The CSV header row is not documented anywhere. It was instead determined empirically, by downloading 48 existing report CSVs from a live account (a read-only operation - the `reports` stream already exposes their download URLs) and collecting the distinct header shapes:
 
 ```

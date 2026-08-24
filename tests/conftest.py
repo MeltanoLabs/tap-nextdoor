@@ -228,18 +228,17 @@ def nam_api(requests_mock):
     )
     requests_mock.get(
         "https://example.com/report.csv",
-        # Header and value formats copied from live report CSVs: snake_case
-        # columns, start_time/end_time rather than a date, and bare decimals.
+        # Header and value formats copied verbatim from a report created via
+        # POST /reporting/create: Title Case headers, a Date column, names but
+        # no IDs, "Gross Spend"/"Total Conversions", and CTR as a percentage.
         text=(
-            "campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,"
-            "placement,start_time,end_time,clicks,impressions,conversions,"
-            "spend,billable_spend,ctr,cpm,cpc\n"
-            "camp1,Campaign 1,ag1,Ad group,ad1,Ad,RHR,"
-            "2025-01-01 12:00 AM,2025-01-02 12:00 AM,"
-            "20,1000,2,26.87,26.78,0.02,12.50,0.62\n"
-            "camp1,Campaign 1,ag1,Ad group,ad1,Ad,FSF,"
-            "2025-01-02 12:00 AM,2025-01-03 12:00 AM,"
-            "5,500,0,6.25,6.25,0.01,12.50,1.25\n"
+            "Campaign Name,Ad Group Name,Ad Name,Placement,Date,Impressions,"
+            "Clicks,CTR,Gross Spend,Billable Spend,CPM,CPC,"
+            "Total Conversions\n"
+            "Campaign 1,Ad group,Ad,FEED,2026-07-01,"
+            "72914,762,1.05%,373.36,371.93,5.10,0.49,2\n"
+            "Campaign 1,Ad group,Ad,RHR,2026-07-02,"
+            "293,1,0.34%,1.29,1.29,4.42,1.29,1\n"
         ),
     )
     requests_mock.get(
