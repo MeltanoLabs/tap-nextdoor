@@ -1,0 +1,107 @@
+[project]
+name = "tap-nextdoor"
+version = "0.0.1"
+description = "Singer tap for the Nextdoor Ads Manager (NAM) API, built with the Meltano Singer SDK."
+readme = "README.md"
+authors = [{ name = "Mathew Abraham", email = "mabraham@meltano.com" }]
+keywords = [
+    "ELT",
+    "Nextdoor",
+]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "singer-sdk~=0.54.5",
+    "requests~=2.34.2",
+]
+
+[project.scripts]
+# CLI declaration
+tap-nextdoor = 'tap_nextdoor.tap:TapNextdoor.cli'
+
+[dependency-groups]
+dev = [
+    { include-group = "test" },
+]
+test = [
+    "pytest>=8",
+    "requests-mock>=1.12",
+    "singer-sdk[testing]",
+]
+typing = [
+    "mypy>=2.3.0",
+    "types-requests",
+]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--durations=10",
+]
+
+[tool.mypy]
+warn_unused_configs = true
+
+[tool.ruff.lint]
+ignore = [
+    "ANN001",
+    "ANN002",
+    "ANN003",
+    "ANN201",
+    "ANN202",
+    "COM812",
+    "CPY001",
+]
+select = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN001",  # pytest fixtures are untyped
+    "S101",    # assert is used by pytest
+]
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[build-system]
+requires = [
+    "hatchling>=1.32.0,<2",
+]
+build-backend = "hatchling.build"
+
+[tool.tox]
+min_version = "4.22"
+requires = [
+    "tox>=4.22",
+    "tox-uv",
+]
+env_list = [
+    "typing",
+    "py313",
+    "py312",
+    "py311",
+    "py310",
+]
+
+[tool.tox.env_run_base]
+runner = "uv-venv-lock-runner"
+pass_env = [
+    "TAP_NEXTDOOR_*",
+]
+dependency_groups = [ "test" ]
+commands = [ [ "pytest", { replace = "posargs", default = [ "tests" ], extend = true } ] ]
+
+[tool.tox.env.typing]
+dependency_groups = [ "test", "typing" ]
+commands = [
+    [ "mypy", { replace = "posargs", default = [ "tap_nextdoor", "tests" ], extend = true } ],
+]

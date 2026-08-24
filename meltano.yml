@@ -1,0 +1,81 @@
+version: 1
+send_anonymous_usage_stats: true
+project_id: "tap-nextdoor"
+default_environment: test
+venv:
+  backend: uv
+environments:
+- name: test
+plugins:
+  extractors:
+  - name: "tap-nextdoor"
+    namespace: "tap_nextdoor"
+    pip_url: -e .
+    capabilities:
+    - state
+    - catalog
+    - discover
+    - about
+    - stream-maps
+
+    settings:
+    - name: access_token
+      label: Access Token
+      description: >
+        Ads API access token, generated in Nextdoor Ads Manager at
+        https://ads.nextdoor.com/v2/manage/api. Sent as a bearer token
+        on every request.
+      sensitive: true
+
+    - name: advertiser_ids
+      kind: array
+      label: Advertiser IDs
+      description: >
+        Filter advertisers (and their child campaigns/ad groups/ads) to extract
+        data for by ID. Leave empty to extract all advertisers the access token
+        has access to, as reported by the /me endpoint.
+
+    - name: start_date
+      kind: date_iso8601
+      label: Start Date
+      description: >
+        Start of the reporting window for the ad_performance_reports stream
+        (a LocalDate, e.g. 2024-01-01). Defaults to today.
+
+    - name: end_date
+      kind: date_iso8601
+      label: End Date
+      description: >
+        End of the reporting window for the ad_performance_reports stream,
+        inclusive. Defaults to today.
+
+    - name: report
+      kind: object
+      label: Ad Performance Report
+      description: >
+        Definition of the custom report built by the ad_performance_reports
+        stream via POST /reporting/create. Keys: metrics, dimension_granularity,
+        time_granularity, name, recipient_emails, campaign_ids, adgroup_ids,
+        ad_ids. NOTE: each sync creates a report in the advertiser's account and
+        emails it to recipient_emails.
+
+    - name: page_size
+      kind: integer
+      label: Page Size
+      description: >
+        Number of records to request per page from the list endpoints
+        (pagination_parameters.page_size).
+
+    settings_group_validation:
+    - [access_token]
+
+    config:
+      start_date: '2025-01-01'
+      page_size: 100
+      # The `report` definition is intentionally NOT set here - it is
+      # environment-specific. Supply it as TAP_NEXTDOOR_REPORT (see .env.example).
+
+  loaders:
+  - name: target-jsonl
+    variant: andyh1203
+    pip_url: target-jsonl
