@@ -9,8 +9,8 @@ Built against the [Nextdoor Ads API reference](https://developer.nextdoor.com/re
 Three traits of the NAM API shape this tap:
 
 1. **List endpoints are `GET` requests with a JSON body.** Parameters like `advertiser_id`, `campaign_id` and `pagination_parameters` go in the request body, not the query string.
-2. **Responses are enveloped.** Records arrive as `{"campaigns": [{"cursor": ..., "data": {...}}], "page_info": {...}}`, so each stream reads `$.<entity>[*].data`.
-3. **Pagination is cursor-based** via `page_info.end_cursor`, echoed back as `pagination_parameters.cursor`. The API returns the same cursor on the final page, so the paginator stops on a short page.
+1. **Responses are enveloped.** Records arrive as `{"campaigns": [{"cursor": ..., "data": {...}}], "page_info": {...}}`, so each stream reads `$.<entity>[*].data`.
+1. **Pagination is cursor-based** via `page_info.end_cursor`, echoed back as `pagination_parameters.cursor`. The API returns the same cursor on the final page, so the paginator stops on a short page.
 
 ## Where the live API differs from the docs
 
@@ -51,11 +51,15 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 ### Notes on specific streams
 
 - **`advertisers`** - the Ads API has no advertiser *list* endpoint (only `advertiser/create` and `advertiser/get/{id}/stats`), so accessible advertisers are read from `/me`'s `user.advertisers_with_access` and optionally narrowed with the `advertiser_ids` setting.
+
 - **`ad_performance_reports`** - a **custom report defined entirely in config** (see below). This is the stream to use for ad performance: it can return a daily time series, which the stats endpoint cannot.
+
 - **`ad_stats`** - the simpler, side-effect-free alternative. `/ad/get/{id}/stats` returns a single aggregate row per ad for the requested window, not a daily time series, so one request is made per ad for `start_date` -> `end_date`. That makes it the slowest stream: cost is one HTTP request per ad. Its schema was built from a live response, since the OpenAPI definition declares an empty object. The same `{entity}/get/{id}/stats` shape exists for advertisers, campaigns, ad groups and creatives if entity-level metrics are wanted later.
 
   For a daily time series, this stream would need to loop the window day-by-day (one request per ad per day) or use `POST /reporting/create` with `time_granularity: DAY` and fetch the resulting CSV. Neither is implemented.
+
 - **`reports`** - lists saved/scheduled report definitions and their `download_url`; it contains no metrics. Creating reports (`POST /reporting/create`, with `dimension_granularity`, `time_granularity` and `metrics` enums) is a write operation and out of scope for a tap.
+
 - **`custom_audiences`** - there is no list endpoint, so audiences are fetched by the ids found on their ad groups (`targeting.custom_audience_targeting`). Each id is requested once, even when shared across ad groups. Not yet exercised against an ad group that has audiences attached - every ad group seen so far has empty include/exclude lists.
 
 ## The `ad_performance_reports` stream

@@ -100,9 +100,7 @@ def test_advertisers_come_from_me_and_honour_the_id_filter(
     tap = TapNextdoor(config=config, parse_env_config=False)
 
     # /me reports both advertisers, keyed by `id` as the live API does ...
-    advertisers = cast(
-        "list[dict]", list(tap.streams["advertisers"].get_records(None))
-    )
+    advertisers = cast("list[dict]", list(tap.streams["advertisers"].get_records(None)))
     assert [a["id"] for a in advertisers] == ["adv1", "adv2"]
 
     # ... but only the selected one is followed into the child streams.

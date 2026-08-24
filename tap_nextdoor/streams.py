@@ -569,6 +569,7 @@ class CustomAudienceStream(NextdoorStream):
         row.pop("custom_audience_ids", None)
         return row
 
+
 # Documented enums for POST /reporting/create. Config values are validated
 # against these so a typo fails with a clear message instead of a 400.
 REPORT_METRICS = (
