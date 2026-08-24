@@ -228,13 +228,18 @@ def nam_api(requests_mock):
     )
     requests_mock.get(
         "https://example.com/report.csv",
+        # Header and value formats copied from live report CSVs: snake_case
+        # columns, start_time/end_time rather than a date, and bare decimals.
         text=(
-            "Date,Ad ID,Ad Name,Impressions,Clicks,CTR,Spend,"
-            "Billable Spend,CPM,CPC,Conversions\n"
-            "2025-01-01,ad1,Ad,1000,20,0.02,GBP 12.50,"
-            "GBP 12.50,GBP 12.50,GBP 0.62,2\n"
-            "2025-01-02,ad1,Ad,500,5,0.01,GBP 6.25,"
-            "GBP 6.25,GBP 12.50,GBP 1.25,0\n"
+            "campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,"
+            "placement,start_time,end_time,clicks,impressions,conversions,"
+            "spend,billable_spend,ctr,cpm,cpc\n"
+            "camp1,Campaign 1,ag1,Ad group,ad1,Ad,RHR,"
+            "2025-01-01 12:00 AM,2025-01-02 12:00 AM,"
+            "20,1000,2,26.87,26.78,0.02,12.50,0.62\n"
+            "camp1,Campaign 1,ag1,Ad group,ad1,Ad,FSF,"
+            "2025-01-02 12:00 AM,2025-01-03 12:00 AM,"
+            "5,500,0,6.25,6.25,0.01,12.50,1.25\n"
         ),
     )
     requests_mock.get(

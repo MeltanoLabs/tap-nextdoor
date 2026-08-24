@@ -110,7 +110,23 @@ All three enum lists are validated against the documented values before any requ
 
 The **schema and primary key are derived from the config**: one column per requested dimension (`AD` -> `ad_id`, `ad_name`), one per requested metric, plus `advertiser_id`, `report_id` and `date`. The key is `advertiser_id` + `date` + the id column of each requested dimension. Money metrics (`SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`) are typed as strings, since the API returns them currency-prefixed; `IMPRESSIONS`/`CLICKS`/`CONVERSIONS` are cast to integers and `CTR` to a float.
 
-CSV headers are normalised to snake_case (`"Ad ID"` -> `ad_id`). The header row is not documented anywhere, so the schema allows additional properties and unexpected columns pass through rather than being dropped. **This is the one part not yet verified against a live response** - see below.
+The CSV header row is not documented anywhere. It was instead determined empirically, by downloading 48 existing report CSVs from a live account (a read-only operation - the `reports` stream already exposes their download URLs) and collecting the distinct header shapes:
+
+```
+campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,start_time,end_time,clicks,impressions,conversions,spend,billable_spend
+campaign_id,campaign_name,start_time,end_time,spend
+campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,start_time,clicks,impressions,conversions,spend,billable_spend
+campaign_id,campaign_name,start_time,spend
+```
+
+Four things follow, all of which the schema reflects:
+
+- Columns are **already snake_case**, so header normalisation is a no-op safeguard rather than a transformation.
+- The ad group columns are **`ad_group_id`/`ad_group_name`**, even though every JSON endpoint calls the same field `adgroup_id`.
+- The time bucket is **`start_time`** (plus `end_time` on reports spanning a range) - there is no `date` column. `start_time` is therefore part of the primary key.
+- Money is a **bare decimal** (`26.87`), unlike the `/stats` endpoint's currency-prefixed `"GBP 0"`, so report metrics are numeric.
+
+`start_time` is kept as a string because its format varies between reports - `2025-09-30` in some, `2025-09-06 12:00 AM` in others - and neither is RFC 3339. The schema still allows additional properties, so a column combination not seen in those 48 samples passes through rather than being dropped.
 
 ### Not implemented
 

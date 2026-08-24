@@ -827,16 +827,13 @@ REPORT_METRICS = (
 REPORT_DIMENSIONS = ("CAMPAIGN", "AD_GROUP", "AD", "PLACEMENT")
 REPORT_TIME_GRANULARITIES = ("DAY", "WEEK", "MONTH")
 
-#: Metrics returned as currency-prefixed strings ("GBP 12.50") rather than numbers.
-_MONEY_METRICS = frozenset({"SPEND", "BILLABLE_SPEND", "CPM", "CPC"})
 #: Metrics returned as whole numbers.
 _INTEGER_METRICS = frozenset({"IMPRESSIONS", "CLICKS", "CONVERSIONS"})
 
-#: JSON type per metric; anything unlisted is treated as a number.
-_METRIC_TYPES: dict[str, t.Any] = {
-    **dict.fromkeys(_MONEY_METRICS, th.StringType),
-    **dict.fromkeys(_INTEGER_METRICS, th.IntegerType),
-}
+#: JSON type per report metric. Unlike the /stats endpoint, which returns
+#: currency-prefixed strings ("GBP 0"), the report CSV carries bare decimals
+#: ("26.87"), so money is numeric here. Anything unlisted is a number.
+_METRIC_TYPES: dict[str, t.Any] = dict.fromkeys(_INTEGER_METRICS, th.IntegerType)
 
 #: Column added to the report for each requested dimension granularity,
 #: with the description attached to it in the generated schema.
@@ -846,8 +843,9 @@ _DIMENSION_COLUMNS = {
         ("campaign_name", "Campaign name"),
     ),
     "AD_GROUP": (
-        ("adgroup_id", "Ad group ID; joins to the ad_groups stream"),
-        ("adgroup_name", "Ad group name"),
+        # The CSV uses ad_group_id; the JSON endpoints use adgroup_id.
+        ("ad_group_id", "Ad group ID; joins to the ad_groups stream"),
+        ("ad_group_name", "Ad group name"),
     ),
     "AD": (
         ("ad_id", "Ad ID; joins to the ads stream"),
@@ -861,16 +859,16 @@ _METRIC_DESCRIPTIONS = {
     "IMPRESSIONS": "Impressions served",
     "CLICKS": "Clicks received",
     "CTR": "Click-through rate as a fraction",
-    "SPEND": 'Spend, currency-prefixed, e.g. "GBP 12.50"',
-    "BILLABLE_SPEND": "Billable spend, currency-prefixed",
-    "CPM": "Cost per thousand impressions, currency-prefixed",
-    "CPC": "Cost per click, currency-prefixed",
+    "SPEND": "Spend for the row, as a bare decimal in the account currency",
+    "BILLABLE_SPEND": "Billable spend, as a bare decimal",
+    "CPM": "Cost per thousand impressions, as a bare decimal",
+    "CPC": "Cost per click, as a bare decimal",
     "CONVERSIONS": "Conversions attributed in the window",
 }
 #: Id column per dimension, used to build the primary key.
 _DIMENSION_KEYS = {
     "CAMPAIGN": "campaign_id",
-    "AD_GROUP": "adgroup_id",
+    "AD_GROUP": "ad_group_id",
     "AD": "ad_id",
     "PLACEMENT": "placement",
 }
@@ -913,7 +911,7 @@ class AdPerformanceReportStream(NextdoorStream):
         self._report = self._validated_report(tap.config.get("report") or {})
         super().__init__(tap=tap, schema=self._build_schema(self._report), **kwargs)
         keys = [_DIMENSION_KEYS[d] for d in self._report["dimension_granularity"]]
-        self._primary_keys = ("advertiser_id", "date", *keys)
+        self._primary_keys = ("advertiser_id", "start_time", *keys)
 
     @property
     def report_config(self) -> dict[str, t.Any]:
@@ -966,10 +964,21 @@ class AdPerformanceReportStream(NextdoorStream):
                 description="ID of the generated report; joins to the reports stream",
             ),
             th.Property(
-                "date",
+                "start_time",
                 th.StringType,
                 description=(
-                    "The report time bucket, at the configured time_granularity"
+                    "Start of the row's time bucket, at the configured "
+                    "time_granularity. Kept as a string: the CSV emits either "
+                    '"2025-09-30" or "2025-09-06 12:00 AM" depending on the '
+                    "report, neither of which is RFC 3339."
+                ),
+            ),
+            th.Property(
+                "end_time",
+                th.StringType,
+                description=(
+                    "End of the row's time bucket. Only present on reports "
+                    "that span a range."
                 ),
             ),
         ]
@@ -1068,8 +1077,7 @@ class AdPerformanceReportStream(NextdoorStream):
             value = row.get(column)
             if value in (None, ""):
                 continue
-            if metric in _INTEGER_METRICS:
-                row[column] = int(float(value))
-            elif metric not in _MONEY_METRICS:
-                row[column] = float(value)
+            row[column] = (
+                int(float(value)) if metric in _INTEGER_METRICS else float(value)
+            )
         return row

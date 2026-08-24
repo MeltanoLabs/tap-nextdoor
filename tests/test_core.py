@@ -18,10 +18,22 @@ if TYPE_CHECKING:
 
 EXPECTED_PAGES = 2
 
-# The two CSV rows served by the mocked report download.
+# The two CSV rows served by the mocked report download, in real live shapes.
 EXPECTED_REPORT_ROWS = (
-    {"impressions": 1000, "clicks": 20, "ctr": 0.02},
-    {"impressions": 500, "clicks": 5, "ctr": 0.01},
+    {
+        "impressions": 1000,
+        "clicks": 20,
+        "ctr": 0.02,
+        "spend": 26.87,
+        "billable_spend": 26.78,
+    },
+    {
+        "impressions": 500,
+        "clicks": 5,
+        "ctr": 0.01,
+        "spend": 6.25,
+        "billable_spend": 6.25,
+    },
 )
 
 EXPECTED_STREAMS = {
@@ -262,13 +274,13 @@ def test_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # no
     assert len(rows) == len(EXPECTED_REPORT_ROWS)
     first = rows[0]
     assert first is not None
-    assert first["date"] == "2025-01-01"
+    assert first["start_time"] == "2025-01-01 12:00 AM"
     assert first["ad_id"] == "ad1"
     assert first["impressions"] == EXPECTED_REPORT_ROWS[0]["impressions"]
     assert first["clicks"] == EXPECTED_REPORT_ROWS[0]["clicks"]
     assert first["ctr"] == EXPECTED_REPORT_ROWS[0]["ctr"]
-    # Money keeps its currency prefix rather than being silently parsed.
-    assert first["spend"] == "GBP 12.50"
+    # The report CSV carries bare decimals, unlike the /stats endpoint.
+    assert first["spend"] == EXPECTED_REPORT_ROWS[0]["spend"]
     assert first["report_id"] == "rep1"
 
 
@@ -287,9 +299,9 @@ def test_report_primary_key_follows_dimensions(config: dict) -> None:
     ]
     assert tuple(stream.primary_keys) == (
         "advertiser_id",
-        "date",
+        "start_time",
         "campaign_id",
-        "adgroup_id",
+        "ad_group_id",
     )
 
 
@@ -335,3 +347,32 @@ def test_unparseable_start_date_is_rejected_clearly(config: dict, nam_api) -> No
     )
     with pytest.raises(ValueError, match="ISO-8601 date or date-time"):
         stream.window_date("start_date")
+
+
+def test_report_money_metrics_are_numeric(config: dict, nam_api) -> None:  # noqa: ARG001
+    """Report spend is a bare decimal, unlike the /stats endpoint's "GBP 0"."""
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "ad_performance_reports"
+    ]
+    rows = [
+        stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
+        for row in stream.get_records({"advertiser_id": "adv1"})
+    ]
+    first = rows[0]
+    assert first is not None
+    expected = EXPECTED_REPORT_ROWS[0]
+    assert first["spend"] == expected["spend"]
+    assert first["billable_spend"] == expected["billable_spend"]
+    assert first["ctr"] == expected["ctr"]
+    assert first["impressions"] == expected["impressions"]
+    assert isinstance(first["impressions"], int)
+
+
+def test_report_uses_the_csv_ad_group_column_name(config: dict, nam_api) -> None:  # noqa: ARG001
+    """The CSV names the column ad_group_id; the JSON endpoints use adgroup_id."""
+    config["report"] = {"dimension_granularity": ["AD_GROUP"]}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "ad_performance_reports"
+    ]
+    assert "ad_group_id" in stream.schema["properties"]
+    assert "adgroup_id" not in stream.schema["properties"]
