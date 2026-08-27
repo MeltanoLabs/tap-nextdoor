@@ -23,14 +23,14 @@ EXPECTED_REPORT_ROWS = (
     {
         "impressions": 72914,
         "clicks": 762,
-        "ctr": 0.0105,  # "1.05%" converted to a fraction
+        "ctr": 1.05,  # "1.05%" with the suffix stripped, scale preserved
         "gross_spend": 373.36,
         "billable_spend": 371.93,
     },
     {
         "impressions": 293,
         "clicks": 1,
-        "ctr": 0.0034,
+        "ctr": 0.34,
         "gross_spend": 1.29,
         "billable_spend": 1.29,
     },
@@ -384,8 +384,13 @@ def test_report_columns_are_names_not_ids(config: dict, nam_api) -> None:  # noq
     assert not {"campaign_id", "ad_group_id", "adgroup_id", "ad_id"} & set(props)
 
 
-def test_report_ctr_percentage_becomes_a_fraction(config: dict, nam_api) -> None:  # noqa: ARG001
-    """CTR arrives as "1.05%" and is converted to match ad_stats.ctr."""
+def test_report_ctr_keeps_its_percentage_scale(config: dict, nam_api) -> None:  # noqa: ARG001
+    """CTR arrives as "1.05%"; the suffix is stripped but the scale is kept.
+
+    ad_stats reports CTR on the same percentage scale - 0.5573934 for an ad
+    with 246 clicks on 44,134 impressions - so rescaling here would make the
+    two performance streams disagree.
+    """
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
         "ad_performance_reports"
     ]

@@ -648,7 +648,12 @@ class AdStatsStream(NextdoorStream):
         th.Property("impressions", th.IntegerType, description="Impressions served"),
         th.Property("clicks", th.IntegerType, description="Clicks received"),
         th.Property(
-            "ctr", th.NumberType, description="Click-through rate as a fraction"
+            "ctr",
+            th.NumberType,
+            description=(
+                "Click-through rate as a percentage value, e.g. 0.557 means "
+                "0.557%. Verified against clicks/impressions on live data."
+            ),
         ),
         th.Property(
             "result",
@@ -872,8 +877,9 @@ _METRIC_DESCRIPTIONS = {
     "IMPRESSIONS": "Impressions served",
     "CLICKS": "Clicks received",
     "CTR": (
-        "Click-through rate as a fraction. The CSV reports a percentage "
-        'string ("1.05%"); the tap converts it so it matches ad_stats.ctr.'
+        "Click-through rate as a percentage value, e.g. 1.05 means 1.05%. "
+        'The CSV reports it as the string "1.05%"; only the suffix is '
+        "stripped, so the scale matches ad_stats.ctr."
     ),
     "SPEND": "Gross spend, as a bare decimal in the account currency",
     "BILLABLE_SPEND": "Billable spend, as a bare decimal",
@@ -882,7 +888,9 @@ _METRIC_DESCRIPTIONS = {
     "CONVERSIONS": "Total conversions attributed in the window",
 }
 
-#: Metrics arriving as a percentage string, converted to a fraction.
+#: Metrics arriving with a "%" suffix. The suffix is stripped but the value is
+#: NOT rescaled: ad_stats returns CTR on the same percentage scale (0.557 for
+#: 0.557%), so dividing by 100 here would make the two streams disagree.
 _PERCENT_METRICS = frozenset({"CTR"})
 
 
@@ -1082,8 +1090,8 @@ class AdPerformanceReportStream(NextdoorStream):
             if value in (None, ""):
                 continue
             if isinstance(value, str) and metric in _PERCENT_METRICS:
-                # "1.05%" -> 0.0105, matching ad_stats.ctr
-                row[column] = float(value.rstrip("%").strip()) / 100
+                # "1.05%" -> 1.05, the same scale ad_stats reports CTR on
+                row[column] = float(value.rstrip("%").strip())
             elif metric in _INTEGER_METRICS:
                 row[column] = int(float(value))
             else:

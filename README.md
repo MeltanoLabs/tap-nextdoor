@@ -139,7 +139,7 @@ Sampling 48 existing reports gives the second shape and is misleading. This stre
 - **No IDs are reported at all** - only `Campaign Name`, `Ad Group Name`, `Ad Name`. Rows therefore cannot be joined to the `campaigns`/`ad_groups`/`ads` streams by ID, only by name, and the primary key is built from names. Renaming an entity in NAM breaks that join and produces what look like new rows.
 - The time bucket is **`Date`**, not the `start_time`/`end_time` the scheduled reports use.
 - Two metric columns are not their enum name: `SPEND` arrives as **`gross_spend`** and `CONVERSIONS` as **`total_conversions`**.
-- **`CTR` is a percentage string** (`"1.05%"`). The tap divides it by 100 so it matches `ad_stats.ctr`, which is already a fraction. This is the one value the tap rewrites rather than passing through.
+- **`CTR` is a percentage string** (`"1.05%"`). The tap strips the suffix but does **not** rescale: `ad_stats` reports CTR on the same percentage scale (`0.5573934` for an ad with 246 clicks on 44,134 impressions), so dividing by 100 would make the two performance streams disagree. Both therefore express CTR as a percentage value - `1.05` means 1.05%.
 - All other money and rate metrics are bare decimals (`373.36`), unlike the `/stats` endpoint's currency-prefixed `"GBP 0"`.
 
 Verified against a live report of 465 rows: every column is declared, nothing passes through undeclared, and the parsed output validates against the generated schema. Only `dimension_granularity` values `CAMPAIGN`/`AD_GROUP`/`AD`/`PLACEMENT` with `time_granularity: [DAY]` have been observed; the schema still allows additional properties, so an unseen combination passes through rather than being dropped.
