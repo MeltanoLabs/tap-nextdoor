@@ -57,7 +57,7 @@ class TapNextdoor(Tap):
             th.DateTimeType,
             title="Start Date",
             description=(
-                "Start of the reporting window for the performance_reports "
+                "Start of the reporting window for the performance_report "
                 "and ad_stats streams. Accepts an ISO-8601 date-time "
                 "(2026-01-01T00:00:00Z) or a plain date (2026-01-01); the API "
                 "takes whole days, so any time component is truncated. "
@@ -117,8 +117,8 @@ class TapNextdoor(Tap):
                     th.StringType,
                     description=(
                         "Override the stream's name. Defaults to "
-                        "performance_reports; set it to match the chosen "
-                        "granularity, e.g. campaign_performance_reports."
+                        "performance_report; set it to match the chosen "
+                        "granularity, e.g. campaign_performance_report."
                     ),
                 ),
                 th.Property(
@@ -150,7 +150,7 @@ class TapNextdoor(Tap):
             title="Ad Performance Report",
             description=(
                 "Definition of the custom report built by the "
-                "performance_reports stream via POST /reporting/create."
+                "performance_report stream via POST /reporting/create."
             ),
         ),
         th.Property(

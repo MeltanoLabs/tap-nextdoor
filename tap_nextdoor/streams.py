@@ -16,7 +16,7 @@ advertisers is discovered from ``/me``):
           custom_audiences        GET /custom_audience/get/{id}
       creatives          GET /advertiser/creative/list
       reports            GET /advertiser/reporting/list
-      performance_reports  POST /reporting/create + CSV download
+      performance_report  POST /reporting/create + CSV download
 """
 
 from __future__ import annotations
@@ -590,7 +590,7 @@ class ReportStream(NextdoorStream):
 class AdStatsStream(NextdoorStream):
     """Per-ad aggregate metrics from ``GET /ad/get/{id}/stats``.
 
-    A cheap-to-reason-about alternative to ``performance_reports``: it has
+    A cheap-to-reason-about alternative to ``performance_report``: it has
     no side effects, but returns one aggregate row per ad for the window
     rather than a daily time series, so it is queried once per ad for
     ``start_date`` -> ``end_date``.
@@ -922,7 +922,7 @@ class PerformanceReportStream(NextdoorStream):
     #: Default stream name. Overridable via ``report.stream_name``, since the
     #: rows are only about ads when ``dimension_granularity`` says so - a
     #: campaign-level report may deserve a campaign-level name.
-    name = "performance_reports"
+    name = "performance_report"
     path = "/reporting/create"
     http_method = "POST"
     records_jsonpath = "$"  # unused; parse_response is overridden

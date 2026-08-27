@@ -36,7 +36,7 @@ Two further quirks the tap handles:
 - **Timestamps are Java `ZonedDateTime`** on campaigns and ad groups: `2025-08-26T00:01:34+01:00[Europe/London]`. The bracketed zone id makes the value invalid against JSON Schema's `date-time` format, so the tap strips it; the UTC offset is kept, so the instant is unchanged.
 - **Money is always a currency-prefixed string** (`"GBP 3.35"`) on bids, budgets and all stats spend fields. These are typed as strings rather than silently parsed, so no currency information is lost.
 
-Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `creative_type`, `text_overlays`, `audience_network_is_on`, `bid.bid_strategy`, `budget.lifetime_delivery_cap_type`, `targeting.geo_source_types`, `targeting.interests_targeting`) are declared explicitly. The `performance_reports` schema additionally allows unknown properties, since its response is undocumented in the OpenAPI definition.
+Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `creative_type`, `text_overlays`, `audience_network_is_on`, `bid.bid_strategy`, `budget.lifetime_delivery_cap_type`, `targeting.geo_source_types`, `targeting.interests_targeting`) are declared explicitly. The `performance_report` schema additionally allows unknown properties, since its response is undocumented in the OpenAPI definition.
 
 ## Streams
 
@@ -51,7 +51,7 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 | `creatives` | Creative assets - headline, body, CTA, image and logo URLs, click and impression trackers | `GET /advertiser/creative/list` | `advertisers` | `updated_at` |
 | `reports` | Saved and scheduled report definitions with their CSV download URLs. Definitions only, no metrics | `GET /advertiser/reporting/list` | `advertisers` | FULL_TABLE |
 | `ad_stats` | Aggregate performance per ad for the configured window - spend, impressions, clicks, CTR, CPC, CPM and a conversion breakdown | `GET /ad/get/{id}/stats` | `ads` | FULL_TABLE |
-| `performance_reports` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions and time buckets. Renameable via `report.stream_name`. **Creates a report in the account and emails it** | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
+| `performance_report` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions and time buckets. Renameable via `report.stream_name`. **Creates a report in the account and emails it** | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
 | `custom_audiences` | Custom audiences referenced by ad groups, with their type and description | `GET /custom_audience/get/{id}` | `ad_groups` | `updated_at` |
 
 ### Stream fields
@@ -64,13 +64,13 @@ uv run tap-nextdoor --config=ENV --discover \
         | to_entries | map({field: .key, type: .value.type, description: .value.description})'
 ```
 
-`performance_reports` is the exception in that its schema is generated from your `report` config, so its fields depend on the metrics and dimensions you request - but those are described too.
+`performance_report` is the exception in that its schema is generated from your `report` config, so its fields depend on the metrics and dimensions you request - but those are described too.
 
 ### Notes on specific streams
 
 - **`advertisers`** - the Ads API has no advertiser *list* endpoint (only `advertiser/create` and `advertiser/get/{id}/stats`), so accessible advertisers are read from `/me`'s `user.advertisers_with_access` and optionally narrowed with the `advertiser_ids` setting.
 
-- **`performance_reports`** - a **custom report defined entirely in config** (see below). This is the stream to use for ad performance: it can return a daily time series, which the stats endpoint cannot.
+- **`performance_report`** - a **custom report defined entirely in config** (see below). This is the stream to use for ad performance: it can return a daily time series, which the stats endpoint cannot.
 
 - **`ad_stats`** - the simpler, side-effect-free alternative. `/ad/get/{id}/stats` returns a single aggregate row per ad for the requested window, not a daily time series, so one request is made per ad for `start_date` -> `end_date`. That makes it the slowest stream: cost is one HTTP request per ad. Its schema was built from a live response, since the OpenAPI definition declares an empty object. The same `{entity}/get/{id}/stats` shape exists for advertisers, campaigns, ad groups and creatives if entity-level metrics are wanted later.
 
@@ -80,7 +80,7 @@ uv run tap-nextdoor --config=ENV --discover \
 
 - **`custom_audiences`** - there is no list endpoint, so audiences are fetched by the ids found on their ad groups (`targeting.custom_audience_targeting`). Each id is requested once, even when shared across ad groups. Not yet exercised against an ad group that has audiences attached - every ad group seen so far has empty include/exclude lists.
 
-## The `performance_reports` stream
+## The `performance_report` stream
 
 Unlike every other stream, this one **writes**. `POST /reporting/create` generates an ad hoc report, emails it to `recipient_emails`, and returns a presigned `download_url` for a CSV, which the tap downloads and emits row by row.
 
@@ -100,7 +100,7 @@ config:
     dimension_granularity: [AD]      # CAMPAIGN, AD_GROUP, AD, PLACEMENT
     time_granularity: [DAY]          # DAY, WEEK, MONTH
     name: tap-nextdoor performance report   # report name in NAM
-    stream_name: performance_reports        # rename the stream if you like
+    stream_name: performance_report        # rename the stream if you like
     recipient_emails: []                    # every sync emails these
     campaign_ids: []                 # optional filters
     adgroup_ids: []
@@ -190,7 +190,7 @@ Four things follow, all of which the schema reflects:
 |---|---|---|
 | `access_token` | Yes | Ads API access token, generated in Nextdoor Ads Manager at https://ads.nextdoor.com/v2/manage/api |
 | `advertiser_ids` | No | Filter advertisers (and their campaigns/ad groups/ads) by ID. Defaults to every advertiser reported by `/me` |
-| `start_date` | No | Start of the `performance_reports` window, as a date (`2025-01-01`). Defaults to today |
+| `start_date` | No | Start of the `performance_report` window, as a date (`2025-01-01`). Defaults to today |
 | `end_date` | No | End of that window, inclusive. Defaults to today |
 | `page_size` | No | Records per page for the list endpoints. Defaults to 100 |
 
@@ -222,7 +222,7 @@ Getting from nothing to a running sync:
    uv run tap-nextdoor --config=ENV --catalog catalog.json | grep '"stream":"advertisers"'
    ```
 1. **Narrow the scope (recommended).** Set `advertiser_ids` to just the accounts you want. Left empty, the tap syncs every advertiser the token can see, which multiplies runtime.
-1. **Set the reporting window.** `start_date` and `end_date` bound `performance_reports` and `ad_stats`. Both default to today, i.e. no history.
+1. **Set the reporting window.** `start_date` and `end_date` bound `performance_report` and `ad_stats`. Both default to today, i.e. no history.
 1. **Run it.**
    ```bash
    meltano run tap-nextdoor target-jsonl
@@ -245,11 +245,11 @@ Getting from nothing to a running sync:
 - The `reports` stream's `download_url` is a presigned S3 URL with embedded AWS credentials. Short-lived, but a credential in a data column - consider deselecting the stream or masking the field.
 - `users` and `profiles` carry personal data (name, email). Deselect them if you do not need them.
 
-**Write access.** `performance_reports` is the only stream that writes: it creates a report in the advertiser's account and emails it to `recipient_emails`. See its section above.
+**Write access.** `performance_report` is the only stream that writes: it creates a report in the advertiser's account and emails it to `recipient_emails`. See its section above.
 
 ## Data recovery and backfill
 
-**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`. The reporting streams (`performance_reports`, `ad_stats`) and the `/me`-derived streams are full-table and re-extract their whole window every run.
+**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`. The reporting streams (`performance_report`, `ad_stats`) and the `/me`-derived streams are full-table and re-extract their whole window every run.
 
 **Backfilling reporting data.** Widen the window and re-run; no state changes are needed, since these streams are full-table:
 

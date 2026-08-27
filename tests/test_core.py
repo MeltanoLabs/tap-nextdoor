@@ -46,7 +46,7 @@ EXPECTED_STREAMS = {
     "creatives",
     "reports",
     "ad_stats",
-    "performance_reports",
+    "performance_report",
     "custom_audiences",
 }
 
@@ -268,7 +268,7 @@ def test_report_defaults_to_all_metrics_by_ad_and_day(config: dict, nam_api) -> 
 def test_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # noqa: ARG001
     """CSV headers are snake_cased and numeric metrics are cast."""
     tap = TapNextdoor(config=config, parse_env_config=False)
-    stream = tap.streams["performance_reports"]
+    stream = tap.streams["performance_report"]
     rows = [
         stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
         for row in stream.get_records({"advertiser_id": "adv1"})
@@ -297,7 +297,7 @@ def test_report_primary_key_follows_dimensions(config: dict) -> None:
     """The key is advertiser + time bucket + one id per requested dimension."""
     config["report"] = {"dimension_granularity": ["CAMPAIGN", "AD_GROUP"]}
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
-        "performance_reports"
+        "performance_report"
     ]
     assert tuple(stream.primary_keys) == (
         "advertiser_id",
@@ -356,7 +356,7 @@ def test_unparseable_start_date_is_rejected_clearly(config: dict, nam_api) -> No
 def test_report_money_metrics_are_numeric(config: dict, nam_api) -> None:  # noqa: ARG001
     """Report spend is a bare decimal, unlike the /stats endpoint's "GBP 0"."""
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
-        "performance_reports"
+        "performance_report"
     ]
     rows = [
         stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
@@ -377,7 +377,7 @@ def test_report_columns_are_names_not_ids(config: dict, nam_api) -> None:  # noq
     config["report"] = {"dimension_granularity": ["CAMPAIGN", "AD_GROUP", "AD"]}
     props = (
         TapNextdoor(config=config, parse_env_config=False)
-        .streams["performance_reports"]
+        .streams["performance_report"]
         .schema["properties"]
     )
     assert {"campaign_name", "ad_group_name", "ad_name"} <= set(props)
@@ -392,7 +392,7 @@ def test_report_ctr_keeps_its_percentage_scale(config: dict, nam_api) -> None:  
     two performance streams disagree.
     """
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
-        "performance_reports"
+        "performance_report"
     ]
     rows = [
         stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
@@ -439,12 +439,12 @@ def test_ad_stats_still_uses_plain_local_dates(config: dict, nam_api) -> None:
 def test_stream_name_is_configurable(config: dict) -> None:
     """report.stream_name renames the stream, so it can match the granularity."""
     default = TapNextdoor(config=config, parse_env_config=False)
-    assert "performance_reports" in default.streams
+    assert "performance_report" in default.streams
 
     config["report"] = {
         "dimension_granularity": ["CAMPAIGN"],
-        "stream_name": "campaign_performance_reports",
+        "stream_name": "campaign_performance_report",
     }
     renamed = TapNextdoor(config=config, parse_env_config=False)
-    assert "campaign_performance_reports" in renamed.streams
-    assert "performance_reports" not in renamed.streams
+    assert "campaign_performance_report" in renamed.streams
+    assert "performance_report" not in renamed.streams
