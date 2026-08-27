@@ -12,10 +12,11 @@ advertisers is discovered from ``/me``):
       campaigns          GET /advertiser/campaign/list
         ad_groups        GET /adgroup/list
           ads            GET /ad/list
-            ad_performance_reports  GET /ad/get/{id}/stats
+            ad_stats     GET /ad/get/{id}/stats
           custom_audiences        GET /custom_audience/get/{id}
       creatives          GET /advertiser/creative/list
-      reports            GET /advertiser/reportinglist
+      reports            GET /advertiser/reporting/list
+      performance_reports  POST /reporting/create + CSV download
 """
 
 from __future__ import annotations
@@ -589,7 +590,7 @@ class ReportStream(NextdoorStream):
 class AdStatsStream(NextdoorStream):
     """Per-ad aggregate metrics from ``GET /ad/get/{id}/stats``.
 
-    A cheap-to-reason-about alternative to ``ad_performance_reports``: it has
+    A cheap-to-reason-about alternative to ``performance_reports``: it has
     no side effects, but returns one aggregate row per ad for the window
     rather than a daily time series, so it is queried once per ad for
     ``start_date`` -> ``end_date``.
@@ -894,8 +895,12 @@ _METRIC_DESCRIPTIONS = {
 _PERCENT_METRICS = frozenset({"CTR"})
 
 
-class AdPerformanceReportStream(NextdoorStream):
-    """A custom ad performance report, defined entirely by the ``report`` config.
+class PerformanceReportStream(NextdoorStream):
+    """A custom performance report, defined entirely by the ``report`` config.
+
+    Both the report definition and the stream's own name come from config, so
+    one workspace can extract an ad-level report and another a campaign-level
+    one without any code change.
 
     Unlike every other stream here this one **writes**: ``POST /reporting/create``
     generates an ad hoc report, emails it to ``recipient_emails``, and returns a
@@ -914,7 +919,10 @@ class AdPerformanceReportStream(NextdoorStream):
     dropped.
     """
 
-    name = "ad_performance_reports"
+    #: Default stream name. Overridable via ``report.stream_name``, since the
+    #: rows are only about ads when ``dimension_granularity`` says so - a
+    #: campaign-level report may deserve a campaign-level name.
+    name = "performance_reports"
     path = "/reporting/create"
     http_method = "POST"
     records_jsonpath = "$"  # unused; parse_response is overridden
@@ -929,7 +937,13 @@ class AdPerformanceReportStream(NextdoorStream):
             kwargs: Additional stream arguments.
         """
         self._report = self._validated_report(tap.config.get("report") or {})
-        super().__init__(tap=tap, schema=self._build_schema(self._report), **kwargs)
+        super().__init__(
+            tap=tap,
+            # None falls back to the class-level default.
+            name=self._report.get("stream_name") or None,
+            schema=self._build_schema(self._report),
+            **kwargs,
+        )
         keys = [_DIMENSION_KEYS[d] for d in self._report["dimension_granularity"]]
         self._primary_keys = ("advertiser_id", "date", *keys)
 
@@ -961,7 +975,8 @@ class AdPerformanceReportStream(NextdoorStream):
             "metrics": metrics,
             "dimension_granularity": dimensions,
             "time_granularity": time_granularity,
-            "name": configured.get("name") or "tap-nextdoor ad performance",
+            "name": configured.get("name") or "tap-nextdoor performance report",
+            "stream_name": configured.get("stream_name") or "",
             "recipient_emails": list(configured.get("recipient_emails") or []),
             "campaign_ids": list(configured.get("campaign_ids") or []),
             "adgroup_ids": list(configured.get("adgroup_ids") or []),

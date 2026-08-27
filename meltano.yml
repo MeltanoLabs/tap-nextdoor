@@ -39,7 +39,7 @@ plugins:
       kind: date_iso8601
       label: Start Date
       description: >
-        Start of the reporting window for the ad_performance_reports and
+        Start of the reporting window for the performance_reports and
         ad_stats streams. Accepts an ISO-8601 date-time
         (2026-01-01T00:00:00Z) or a plain date (2026-01-01); the API takes
         whole days, so any time component is truncated. Defaults to today.
@@ -55,11 +55,12 @@ plugins:
       kind: object
       label: Ad Performance Report
       description: >
-        Definition of the custom report built by the ad_performance_reports
+        Definition of the custom report built by the performance_reports
         stream via POST /reporting/create. Keys: metrics, dimension_granularity,
-        time_granularity, name, recipient_emails, campaign_ids, adgroup_ids,
-        ad_ids. NOTE: each sync creates a report in the advertiser's account and
-        emails it to recipient_emails.
+        time_granularity, name, stream_name, recipient_emails, campaign_ids,
+        adgroup_ids, ad_ids. Set stream_name to match the chosen granularity,
+        e.g. campaign_performance_reports. NOTE: each sync creates a report in
+        the advertiser's account and emails it to recipient_emails.
 
     - name: page_size
       kind: integer
