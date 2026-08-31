@@ -32,6 +32,10 @@ if t.TYPE_CHECKING:
 
 DEFAULT_PAGE_SIZE = 100
 
+#: Days of already-synced history the ad_stats stream re-fetches, because ad
+#: metrics are restated as conversions are attributed after the fact.
+DEFAULT_LOOKBACK_DAYS = 7
+
 
 def as_local_date(value: str) -> date:
     """Parse an ISO-8601 date or date-time into a ``LocalDate``.

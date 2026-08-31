@@ -154,6 +154,18 @@ class TapNextdoor(Tap):
             ),
         ),
         th.Property(
+            "lookback_days",
+            th.IntegerType,
+            title="Lookback Days",
+            description=(
+                "How far before the bookmark the ad_stats stream restarts on "
+                "an incremental run. Ad metrics are restated as conversions "
+                "are attributed after the fact, so recent days are "
+                "re-fetched. Defaults to 7."
+            ),
+            default=7,
+        ),
+        th.Property(
             "page_size",
             th.IntegerType,
             title="Page Size",

@@ -50,7 +50,7 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 | `ads` | Individual ads, linking an ad group to the creative it renders | `GET /ad/list` | `ad_groups` | `updated_at` |
 | `creatives` | Creative assets - headline, body, CTA, image and logo URLs, click and impression trackers | `GET /advertiser/creative/list` | `advertisers` | `updated_at` |
 | `reports` | Saved and scheduled report definitions with their CSV download URLs. Definitions only, no metrics | `GET /advertiser/reporting/list` | `advertisers` | FULL_TABLE |
-| `ad_stats` | Aggregate performance per ad for the configured window - spend, impressions, clicks, CTR, CPC, CPM and a conversion breakdown | `GET /ad/get/{id}/stats` | `ads` | FULL_TABLE |
+| `ad_stats` | Daily performance per ad - spend, impressions, clicks, CTR, CPC, CPM and a full conversion breakdown | `GET /ad/get/{id}/stats` | `ads` | `date` |
 | `performance_report` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions and time buckets. Renameable via `report.stream_name`. **Creates a report in the account and emails it** | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
 | `custom_audiences` | Custom audiences referenced by ad groups, with their type and description | `GET /custom_audience/get/{id}` | `ad_groups` | `updated_at` |
 
@@ -72,7 +72,13 @@ uv run tap-nextdoor --config=ENV --discover \
 
 - **`performance_report`** - a **custom report defined entirely in config** (see below). This is the stream to use for ad performance: it can return a daily time series, which the stats endpoint cannot.
 
-- **`ad_stats`** - the simpler, side-effect-free alternative. `/ad/get/{id}/stats` returns a single aggregate row per ad for the requested window, not a daily time series, so one request is made per ad for `start_date` -> `end_date`. That makes it the slowest stream: cost is one HTTP request per ad. Its schema was built from a live response, since the OpenAPI definition declares an empty object. The same `{entity}/get/{id}/stats` shape exists for advertisers, campaigns, ad groups and creatives if entity-level metrics are wanted later.
+- **`ad_stats`** - the side-effect-free daily series. The endpoint returns one aggregate row for whatever window it is given, so the stream walks the window **one day at a time**: `start_time == end_time` on every request. Verified additive against the API - three consecutive single-day windows summed exactly to the equivalent three-day window - and verified live end to end.
+
+  It replicates incrementally on `date`. Because ad metrics are restated as conversions are attributed late, an incremental run restarts `lookback_days` (default 7) before the bookmark rather than trusting recent days as final. A single shared bookmark is used rather than one per ad; the stream is left unsorted, so the SDK holds the starting value steady for the whole run and only finalises it at the end, meaning ads synced later still get the full window.
+
+  **Cost scales with ads x days: one request per ad per day.** For 271 ads that is 271 requests for a daily incremental run, but ~8,400 for a month-long backfill and ~99,000 for a year. Widen `start_date` deliberately, and prefer `performance_report` (2 requests per advertiser) when a conversion breakdown and real ad IDs are not needed.
+
+  Its schema was built from a live response, since the OpenAPI definition declares an empty object. The same `{entity}/get/{id}/stats` shape exists for advertisers, campaigns, ad groups and creatives if entity-level metrics are wanted later.
 
   For a daily time series, this stream would need to loop the window day-by-day (one request per ad per day) or use `POST /reporting/create` with `time_granularity: DAY` and fetch the resulting CSV. Neither is implemented.
 
@@ -249,7 +255,7 @@ Getting from nothing to a running sync:
 
 ## Data recovery and backfill
 
-**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`. The reporting streams (`performance_report`, `ad_stats`) and the `/me`-derived streams are full-table and re-extract their whole window every run.
+**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`; `ad_stats` replicates incrementally on `date`. `performance_report` and the `/me`-derived streams are full-table and re-extract their whole window every run.
 
 **Backfilling reporting data.** Widen the window and re-run; no state changes are needed, since these streams are full-table:
 
@@ -259,9 +265,9 @@ TAP_NEXTDOOR_END_DATE=2025-12-31T00:00:00Z \
   meltano run tap-nextdoor target-jsonl
 ```
 
-Cost scales with the window and the number of ads, so backfill in chunks (a month at a time) rather than one multi-year run. `ad_stats` in particular issues **one request per ad**.
+Cost scales with the window and the number of ads, so backfill in chunks (a month at a time) rather than one multi-year run. `ad_stats` is the one to watch: it issues **one request per ad per day**, so a year-long backfill across 271 ads is roughly 99,000 requests.
 
-**Recovering the incremental streams.** These are keyed on `updated_at`, so a full re-extract means clearing the bookmark:
+**Recovering the incremental streams.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` are keyed on `updated_at`, and `ad_stats` on `date`, so a full re-extract means clearing the bookmark:
 
 ```bash
 # inspect

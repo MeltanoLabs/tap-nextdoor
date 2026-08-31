@@ -7,6 +7,7 @@ rather than against the real API.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -17,6 +18,9 @@ if TYPE_CHECKING:
     from tap_nextdoor.client import NextdoorStream
 
 EXPECTED_PAGES = 2
+
+# The conftest window is 2025-01-01..2025-01-31.
+JANUARY_DAYS = 31
 
 # The two CSV rows served by the mocked report download, in real live shapes.
 EXPECTED_REPORT_ROWS = (
@@ -178,8 +182,8 @@ def test_all_advertisers_are_synced_without_a_filter(config: dict, nam_api) -> N
     assert requested == {"adv1", "adv2"}
 
 
-def test_ad_performance_sends_the_reporting_window(config: dict, nam_api) -> None:
-    """The stats endpoint receives LocalDate start/end times from config."""
+def test_ad_stats_requests_one_day_at_a_time(config: dict, nam_api) -> None:
+    """ad_stats is a daily series: start_time == end_time on every request."""
     TapNextdoor(config=config, parse_env_config=False).streams["advertisers"].sync()
 
     stats = [
@@ -191,8 +195,13 @@ def test_ad_performance_sends_the_reporting_window(config: dict, nam_api) -> Non
     assert stats[0] == {
         "advertiser_id": "adv1",
         "start_time": "2025-01-01",
-        "end_time": "2025-01-31",
+        "end_time": "2025-01-01",
     }
+    # Every request covers exactly one day ...
+    assert all(s["start_time"] == s["end_time"] for s in stats)
+    # ... and the window 2025-01-01..2025-01-31 is 31 of them, per ad.
+    assert max(s["start_time"] for s in stats) == "2025-01-31"
+    assert len({s["start_time"] for s in stats}) == JANUARY_DAYS
 
 
 def test_custom_audiences_are_fetched_once_per_id(config: dict, nam_api) -> None:
@@ -331,6 +340,8 @@ def test_start_date_accepts_iso8601_date_times(
     supports 3.10.
     """
     config["start_date"] = configured
+    # ad_stats now walks day by day, so keep the window to that single day.
+    config["end_date"] = configured
     tap = TapNextdoor(config=config, parse_env_config=False)
     tap.streams["advertisers"].sync()
 
@@ -433,7 +444,67 @@ def test_ad_stats_still_uses_plain_local_dates(config: dict, nam_api) -> None:
         if r.path.endswith("/ad/get/ad1/stats")
     )
     assert stats["start_time"] == "2025-01-01"
-    assert stats["end_time"] == "2025-01-31"
+    assert stats["end_time"] == "2025-01-01"
+
+
+def test_ad_stats_stamps_the_day_on_each_record(config: dict, nam_api) -> None:  # noqa: ARG001
+    """Each row carries the day it covers, which is the replication key."""
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    stream = cast("NextdoorStream", tap.streams["ad_stats"])
+    rows = list(stream.get_records({"advertiser_id": "adv1", "ad_id": "ad1"}))
+
+    assert len(rows) == JANUARY_DAYS
+    assert [r["date"] for r in rows][:3] == [
+        "2025-01-01",
+        "2025-01-02",
+        "2025-01-03",
+    ]
+
+
+def test_ad_stats_resumes_from_the_bookmark_with_a_lookback(
+    config: dict,
+    nam_api,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incremental run restarts `lookback_days` before the bookmark.
+
+    Ad metrics are restated as conversions are attributed late, so recent days
+    are deliberately re-fetched rather than trusted as final.
+    """
+    config["lookback_days"] = 3
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    stream = cast("NextdoorStream", tap.streams["ad_stats"])
+    # Stand in for a stored bookmark, rather than hand-building state JSON.
+    monkeypatch.setattr(
+        stream,
+        "get_starting_replication_key_value",
+        lambda _context: "2025-01-20",
+    )
+    days = [
+        r["date"] for r in stream.get_records({"advertiser_id": "adv1", "ad_id": "ad1"})
+    ]
+
+    assert days[0] == "2025-01-17", "should rewind 3 days before the bookmark"
+    assert days[-1] == "2025-01-31"
+
+
+def test_ad_stats_warns_when_the_window_is_empty(
+    config: dict,
+    nam_api,  # noqa: ARG001
+    caplog,
+) -> None:
+    """A start_date after end_date syncs nothing, and says so."""
+    config["start_date"] = "2026-01-01"
+    config["end_date"] = "2025-01-31"
+    stream = cast(
+        "NextdoorStream",
+        TapNextdoor(config=config, parse_env_config=False).streams["ad_stats"],
+    )
+    with caplog.at_level(logging.WARNING):
+        rows = list(stream.get_records({"advertiser_id": "adv1", "ad_id": "ad1"}))
+
+    assert rows == []
+    assert "is after end_date" in caplog.text
 
 
 def test_stream_name_is_configurable(config: dict) -> None:

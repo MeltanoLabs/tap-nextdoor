@@ -62,6 +62,14 @@ plugins:
         e.g. campaign_performance_report. NOTE: each sync creates a report in
         the advertiser's account and emails it to recipient_emails.
 
+    - name: lookback_days
+      kind: integer
+      label: Lookback Days
+      description: >
+        How far before the bookmark the ad_stats stream restarts on an
+        incremental run. Ad metrics are restated as conversions are attributed
+        after the fact, so recent days are re-fetched. Defaults to 7.
+
     - name: page_size
       kind: integer
       label: Page Size

@@ -25,12 +25,17 @@ import csv
 import io
 import re
 import typing as t
+from datetime import date, timedelta
 
 import requests
 from singer_sdk import typing as th
 from singer_sdk.pagination import SinglePagePaginator
 
-from tap_nextdoor.client import NextdoorStream
+from tap_nextdoor.client import (
+    DEFAULT_LOOKBACK_DAYS,
+    NextdoorStream,
+    as_local_date,
+)
 
 if t.TYPE_CHECKING:
     from singer_sdk import Tap
@@ -605,9 +610,13 @@ class AdStatsStream(NextdoorStream):
 
     name = "ad_stats"
     path = "/ad/get/{ad_id}/stats"
-    primary_keys = ("ad_id", "start_time", "end_time")
+    primary_keys = ("ad_id", "date")
+    replication_key = "date"
     records_jsonpath = "$"
     parent_stream_type = AdStream
+    # One shared bookmark rather than one per ad: with is_sorted left False the
+    # SDK holds the starting value steady for the whole run and only finalises
+    # it at the end, so ads synced later in the run still get the full window.
     state_partitioning_keys: t.ClassVar[list[str]] = []
     zoned_datetime_fields = ()
 
@@ -619,6 +628,12 @@ class AdStatsStream(NextdoorStream):
             description="Ad these metrics are for",
         ),
         th.Property("advertiser_id", th.StringType, description="Owning advertiser ID"),
+        th.Property(
+            "date",
+            th.DateType,
+            required=True,
+            description="The day these metrics cover; replication key",
+        ),
         th.Property(
             "start_time", th.DateTimeType, description="Start of the reporting window"
         ),
@@ -715,6 +730,58 @@ class AdStatsStream(NextdoorStream):
         """Return a single-page paginator - the stats endpoint is not paginated."""
         return SinglePagePaginator()
 
+    def get_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Request one day at a time, so the stream is a daily time series.
+
+        The endpoint returns a single aggregate row for whatever window it is
+        given, so day-level detail means one request per ad per day. Verified
+        additive on live data: three consecutive single-day windows summed
+        exactly to the equivalent three-day window.
+
+        Args:
+            context: The stream context, carrying the ad and advertiser ids.
+
+        Yields:
+            One record per day for this ad.
+        """
+        for day in self._days(context):
+            for record in super().get_records({**(context or {}), "day": day}):
+                # Stamped here rather than in post_process: the SDK calls
+                # post_process with the context passed to _sync_records, which
+                # has no knowledge of the day being requested.
+                record["date"] = day.isoformat()
+                yield record
+
+    def _days(self, context: Context | None) -> list[date]:
+        """Return the days to request, oldest first.
+
+        Incremental syncs resume from the bookmark, less ``lookback_days`` -
+        ad metrics are restated as conversions are attributed late, so recent
+        days are deliberately re-fetched.
+        """
+        end = self.window_date("end_date")
+
+        start = self.window_date("start_date")
+        # get_starting_timestamp() would raise here: it insists the replication
+        # key be a date-time, and `date` is a plain date. The raw bookmark value
+        # is what we want anyway.
+        if bookmark := self.get_starting_replication_key_value(context):
+            resumed = as_local_date(str(bookmark)) - timedelta(
+                days=self.config.get("lookback_days", DEFAULT_LOOKBACK_DAYS)
+            )
+            start = max(start, resumed)
+
+        if start > end:
+            self.logger.warning(
+                "%s: start_date (%s) is after end_date (%s); no days to sync.",
+                self.name,
+                start.isoformat(),
+                end.isoformat(),
+            )
+            return []
+        span = (end - start).days + 1
+        return [start + timedelta(days=offset) for offset in range(span)]
+
     def prepare_request_payload(
         self,
         context: Context | None,
@@ -728,12 +795,17 @@ class AdStatsStream(NextdoorStream):
         context = context or {}
         return {
             "advertiser_id": context["advertiser_id"],
-            "start_time": self.window_date("start_date").isoformat(),
-            "end_time": self.window_date("end_date").isoformat(),
+            # start == end asks the API for exactly that one day.
+            "start_time": context["day"].isoformat(),
+            "end_time": context["day"].isoformat(),
         }
 
     def post_process(self, row: dict, context: Context | None = None) -> dict | None:
-        """Stamp the ad and advertiser ids onto the metrics row."""
+        """Stamp the ad and advertiser ids onto the metrics row.
+
+        ``date`` is stamped in :meth:`get_records`, which is the only place
+        that knows which day was requested.
+        """
         context = context or {}
         row["ad_id"] = context["ad_id"]
         row["advertiser_id"] = context["advertiser_id"]
