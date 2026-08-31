@@ -82,7 +82,7 @@ plugins:
 
     config:
       start_date: '2025-01-01'
-      page_size: 100
+      page_size: 500
       # The `report` definition is intentionally NOT set here - it is
       # environment-specific. Supply it as TAP_NEXTDOOR_REPORT (see .env.example).
 
