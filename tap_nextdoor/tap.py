@@ -173,7 +173,7 @@ class TapNextdoor(Tap):
                 "Number of records to request per page from the list "
                 "endpoints (pagination_parameters.page_size)."
             ),
-            default=100,
+            default=500,
         ),
     ).to_dict()
 
