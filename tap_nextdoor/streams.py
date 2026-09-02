@@ -890,8 +890,10 @@ class CustomAudienceStream(NextdoorStream):
         return row
 
 
-# Documented enums for POST /reporting/create. Config values are validated
-# against these so a typo fails with a clear message instead of a 400.
+# Enums for POST /reporting/create. The reference docs list only 8 metrics and
+# 4 dimensions; the API accepts 21 and 8. The full sets below were read out of
+# the API's own validation error, which enumerates the accepted values, and
+# then confirmed by creating a report with all of them at once.
 REPORT_METRICS = (
     "IMPRESSIONS",
     "CLICKS",
@@ -900,40 +902,82 @@ REPORT_METRICS = (
     "BILLABLE_SPEND",
     "CPM",
     "CPC",
+    "CPA",
     "CONVERSIONS",
+    "RESULT",
+    "COST_PER_RESULT",
+    "LEAD_GEN_FORM_SUBMISSIONS",
+    "LEAD_GEN_FORM_COMPLETION_RATE",
+    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS",
+    "VIDEO_FORMAT_SEC_2_VIEWS",
+    "VIDEO_FORMAT_PERCENT_25_VIEWS",
+    "VIDEO_FORMAT_PERCENT_50_VIEWS",
+    "VIDEO_FORMAT_PERCENT_75_VIEWS",
+    "VIDEO_FORMAT_PERCENT_100_VIEWS",
+    # Accepted by the enum but gated behind an account feature flag: requesting
+    # either returns REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE unless
+    # 'ads2_app_install_report_builder' is enabled. Their columns are unverified.
+    "APP_INSTALLS",
+    "COST_PER_INSTALL",
 )
-REPORT_DIMENSIONS = ("CAMPAIGN", "AD_GROUP", "AD", "PLACEMENT")
+REPORT_DIMENSIONS = (
+    "CAMPAIGN",
+    "CAMPAIGN_ID",
+    "AD_GROUP",
+    "AD_GROUP_ID",
+    "AD",
+    "AD_ID",
+    "PLATFORM_TYPE",
+    "PLACEMENT",
+)
 REPORT_TIME_GRANULARITIES = ("DAY", "WEEK", "MONTH")
 
 #: Metrics returned as whole numbers.
-_INTEGER_METRICS = frozenset({"IMPRESSIONS", "CLICKS", "CONVERSIONS"})
+_INTEGER_METRICS = frozenset(
+    {
+        "IMPRESSIONS",
+        "CLICKS",
+        "CONVERSIONS",
+        "LEAD_GEN_FORM_SUBMISSIONS",
+        "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS",
+        "VIDEO_FORMAT_SEC_2_VIEWS",
+        "VIDEO_FORMAT_PERCENT_25_VIEWS",
+        "VIDEO_FORMAT_PERCENT_50_VIEWS",
+        "VIDEO_FORMAT_PERCENT_75_VIEWS",
+        "VIDEO_FORMAT_PERCENT_100_VIEWS",
+        "APP_INSTALLS",
+    }
+)
 
-#: JSON type per report metric. Unlike the /stats endpoint, which returns
-#: currency-prefixed strings ("GBP 0"), the report CSV carries bare decimals
-#: ("26.87"), so money is numeric here. Anything unlisted is a number.
+#: JSON type per report metric; anything unlisted is a number.
 _METRIC_TYPES: dict[str, t.Any] = dict.fromkeys(_INTEGER_METRICS, th.IntegerType)
 
 #: Column added to the report for each requested dimension granularity, with
-#: the description attached to it in the generated schema. Determined from live
-#: reports: the CSV carries *names only*, no IDs, for every dimension.
+#: the description attached to it in the generated schema. Verified live.
 _DIMENSION_COLUMNS = {
-    "CAMPAIGN": (("campaign_name", "Campaign name; no campaign ID is reported"),),
-    "AD_GROUP": (("ad_group_name", "Ad group name; no ad group ID is reported"),),
-    "AD": (("ad_name", "Ad name; no ad ID is reported"),),
+    "CAMPAIGN": (("campaign_name", "Campaign name"),),
+    "CAMPAIGN_ID": (("campaign_id", "Campaign ID; joins to the campaigns stream"),),
+    "AD_GROUP": (("ad_group_name", "Ad group name"),),
+    "AD_GROUP_ID": (("ad_group_id", "Ad group ID; joins to the ad_groups stream"),),
+    "AD": (("ad_name", "Ad name"),),
+    "AD_ID": (("ad_id", "Ad ID; joins to the ads and ad_stats streams"),),
+    "PLATFORM_TYPE": (("platform", 'Delivery platform, e.g. "On Platform"'),),
     "PLACEMENT": (("placement", "Placement the metrics are attributed to"),),
 }
 
-#: Column that identifies each dimension, used to build the primary key. Names
-#: are all the API gives us here.
-_DIMENSION_KEYS = {
-    "CAMPAIGN": "campaign_name",
-    "AD_GROUP": "ad_group_name",
-    "AD": "ad_name",
-    "PLACEMENT": "placement",
-}
+#: Dimensions that identify the same entity, most specific first. Only the
+#: first requested member of each family joins the primary key, so asking for
+#: both AD_ID and AD keys on the id rather than the ambiguous name.
+_DIMENSION_FAMILIES = (
+    ("CAMPAIGN_ID", "CAMPAIGN"),
+    ("AD_GROUP_ID", "AD_GROUP"),
+    ("AD_ID", "AD"),
+    ("PLATFORM_TYPE",),
+    ("PLACEMENT",),
+)
 
-#: CSV column each metric arrives in, after header normalisation. Most are just
-#: the lowercased enum, but SPEND and CONVERSIONS are not.
+#: CSV column each metric arrives in, after header normalisation. Several do
+#: not match the lowercased enum at all.
 _METRIC_COLUMNS = {
     "IMPRESSIONS": "impressions",
     "CLICKS": "clicks",
@@ -942,7 +986,20 @@ _METRIC_COLUMNS = {
     "BILLABLE_SPEND": "billable_spend",
     "CPM": "cpm",
     "CPC": "cpc",
+    "CPA": "cpa",
     "CONVERSIONS": "total_conversions",
+    "RESULT": "result",
+    "COST_PER_RESULT": "cost_per_result",
+    "LEAD_GEN_FORM_SUBMISSIONS": "lead_gen_form_submissions",
+    "LEAD_GEN_FORM_COMPLETION_RATE": "lead_gen_form_completion_rate",
+    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS": "lead_gen_form_confirmation_cta_clicks",
+    "VIDEO_FORMAT_SEC_2_VIEWS": "video_views_at_2_seconds",
+    "VIDEO_FORMAT_PERCENT_25_VIEWS": "video_views_at_25",
+    "VIDEO_FORMAT_PERCENT_50_VIEWS": "video_views_at_50",
+    "VIDEO_FORMAT_PERCENT_75_VIEWS": "video_views_at_75",
+    "VIDEO_FORMAT_PERCENT_100_VIEWS": "video_views_at_100",
+    "APP_INSTALLS": "app_installs",
+    "COST_PER_INSTALL": "cost_per_install",
 }
 
 #: Description per report metric.
@@ -951,20 +1008,40 @@ _METRIC_DESCRIPTIONS = {
     "CLICKS": "Clicks received",
     "CTR": (
         "Click-through rate as a percentage value, e.g. 1.05 means 1.05%. "
-        'The CSV reports it as the string "1.05%"; only the suffix is '
-        "stripped, so the scale matches ad_stats.ctr."
+        'The CSV reports the string "1.05%"; only the suffix is stripped, so '
+        "the scale matches ad_stats.ctr."
     ),
     "SPEND": "Gross spend, as a bare decimal in the account currency",
     "BILLABLE_SPEND": "Billable spend, as a bare decimal",
     "CPM": "Cost per thousand impressions, as a bare decimal",
     "CPC": "Cost per click, as a bare decimal",
+    "CPA": "Cost per acquisition, as a bare decimal",
     "CONVERSIONS": "Total conversions attributed in the window",
+    "RESULT": "Results against the campaign objective",
+    "COST_PER_RESULT": "Cost per result, as a bare decimal",
+    "LEAD_GEN_FORM_SUBMISSIONS": "Lead gen form submissions",
+    "LEAD_GEN_FORM_COMPLETION_RATE": (
+        "Lead gen form completion rate as a percentage value; the CSV reports "
+        'it as a string like "0.00%"'
+    ),
+    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS": (
+        "Clicks on the lead gen form confirmation call to action"
+    ),
+    "VIDEO_FORMAT_SEC_2_VIEWS": "Video views reaching 2 seconds",
+    "VIDEO_FORMAT_PERCENT_25_VIEWS": "Video views reaching 25%",
+    "VIDEO_FORMAT_PERCENT_50_VIEWS": "Video views reaching 50%",
+    "VIDEO_FORMAT_PERCENT_75_VIEWS": "Video views reaching 75%",
+    "VIDEO_FORMAT_PERCENT_100_VIEWS": "Video views reaching 100%",
+    "APP_INSTALLS": "App installs. Requires an account feature flag; unverified.",
+    "COST_PER_INSTALL": (
+        "Cost per app install. Requires an account feature flag; unverified."
+    ),
 }
 
 #: Metrics arriving with a "%" suffix. The suffix is stripped but the value is
 #: NOT rescaled: ad_stats returns CTR on the same percentage scale (0.557 for
 #: 0.557%), so dividing by 100 here would make the two streams disagree.
-_PERCENT_METRICS = frozenset({"CTR"})
+_PERCENT_METRICS = frozenset({"CTR", "LEAD_GEN_FORM_COMPLETION_RATE"})
 
 
 class PerformanceReportStream(NextdoorStream):
@@ -1016,8 +1093,11 @@ class PerformanceReportStream(NextdoorStream):
             schema=self._build_schema(self._report),
             **kwargs,
         )
-        keys = [_DIMENSION_KEYS[d] for d in self._report["dimension_granularity"]]
-        self._primary_keys = ("advertiser_id", "date", *keys)
+        self._primary_keys = (
+            "advertiser_id",
+            "date",
+            *self._key_columns(self._report["dimension_granularity"]),
+        )
 
     @property
     def report_config(self) -> dict[str, t.Any]:
@@ -1028,7 +1108,7 @@ class PerformanceReportStream(NextdoorStream):
     def _validated_report(configured: dict[str, t.Any]) -> dict[str, t.Any]:
         """Validate the configured report definition and apply defaults."""
         metrics = list(configured.get("metrics") or REPORT_METRICS)
-        dimensions = list(configured.get("dimension_granularity") or ["AD"])
+        dimensions = list(configured.get("dimension_granularity") or ["AD_ID", "AD"])
         time_granularity = list(configured.get("time_granularity") or ["DAY"])
 
         for values, allowed, label in (
@@ -1054,6 +1134,22 @@ class PerformanceReportStream(NextdoorStream):
             "adgroup_ids": list(configured.get("adgroup_ids") or []),
             "ad_ids": list(configured.get("ad_ids") or []),
         }
+
+    @staticmethod
+    def _key_columns(dimensions: list[str]) -> list[str]:
+        """Return one key column per requested dimension family.
+
+        Asking for both ``AD_ID`` and ``AD`` yields two columns but only one
+        identity, so the id is preferred and the name left out of the key.
+        """
+        requested = set(dimensions)
+        columns = []
+        for family in _DIMENSION_FAMILIES:
+            for member in family:
+                if member in requested:
+                    columns.append(_DIMENSION_COLUMNS[member][0][0])
+                    break
+        return columns
 
     @staticmethod
     def _build_schema(report: dict[str, t.Any]) -> dict:

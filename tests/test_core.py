@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from tap_nextdoor import streams
 from tap_nextdoor.tap import TapNextdoor
 
 if TYPE_CHECKING:
@@ -250,7 +251,7 @@ def test_report_definition_comes_from_config(config: dict, nam_api) -> None:
 
 
 def test_report_defaults_to_all_metrics_by_ad_and_day(config: dict, nam_api) -> None:
-    """With no report config, every metric is requested by AD and DAY."""
+    """With no report config, every metric is requested by ad id/name and DAY."""
     tap = TapNextdoor(config=config, parse_env_config=False)
     tap.streams["advertisers"].sync()
 
@@ -259,17 +260,8 @@ def test_report_defaults_to_all_metrics_by_ad_and_day(config: dict, nam_api) -> 
         for r in nam_api.request_history
         if r.path == "/v2/api/reporting/create"
     )
-    assert body["metrics"] == [
-        "IMPRESSIONS",
-        "CLICKS",
-        "CTR",
-        "SPEND",
-        "BILLABLE_SPEND",
-        "CPM",
-        "CPC",
-        "CONVERSIONS",
-    ]
-    assert body["dimension_granularity"] == ["AD"]
+    assert body["metrics"] == list(streams.REPORT_METRICS)
+    assert body["dimension_granularity"] == ["AD_ID", "AD"]
     assert body["time_granularity"] == ["DAY"]
     assert body["recipient_emails"] == []
 
@@ -287,6 +279,7 @@ def test_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # no
     assert first is not None
     assert first["date"] == "2026-07-01"
     assert first["ad_name"] == "Ad"
+    assert first["ad_id"] == "ad1"
     assert first["impressions"] == EXPECTED_REPORT_ROWS[0]["impressions"]
     assert first["clicks"] == EXPECTED_REPORT_ROWS[0]["clicks"]
     assert first["ctr"] == EXPECTED_REPORT_ROWS[0]["ctr"]

@@ -232,13 +232,10 @@ def nam_api(requests_mock):
         # POST /reporting/create: Title Case headers, a Date column, names but
         # no IDs, "Gross Spend"/"Total Conversions", and CTR as a percentage.
         text=(
-            "Campaign Name,Ad Group Name,Ad Name,Placement,Date,Impressions,"
-            "Clicks,CTR,Gross Spend,Billable Spend,CPM,CPC,"
-            "Total Conversions\n"
-            "Campaign 1,Ad group,Ad,FEED,2026-07-01,"
-            "72914,762,1.05%,373.36,371.93,5.10,0.49,2\n"
-            "Campaign 1,Ad group,Ad,RHR,2026-07-02,"
-            "293,1,0.34%,1.29,1.29,4.42,1.29,1\n"
+            "Ad Name,Ad Id,Date,Impressions,Clicks,CTR,Gross Spend,"
+            "Billable Spend,CPM,CPC,Total Conversions\n"
+            "Ad,ad1,2026-07-01,72914,762,1.05%,373.36,371.93,5.10,0.49,2\n"
+            "Ad,ad1,2026-07-02,293,1,0.34%,1.29,1.29,4.42,1.29,1\n"
         ),
     )
     requests_mock.get(

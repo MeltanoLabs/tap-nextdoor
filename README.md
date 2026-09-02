@@ -103,7 +103,7 @@ config:
   end_date: '2026-07-31'     # inclusive
   report:
     metrics: [IMPRESSIONS, CLICKS, CTR, SPEND, BILLABLE_SPEND, CPM, CPC, CONVERSIONS]
-    dimension_granularity: [AD]      # CAMPAIGN, AD_GROUP, AD, PLACEMENT
+    dimension_granularity: [AD_ID, AD]   # + CAMPAIGN(_ID), AD_GROUP(_ID), PLATFORM_TYPE, PLACEMENT
     time_granularity: [DAY]          # DAY, WEEK, MONTH
     name: tap-nextdoor performance report   # report name in NAM
     stream_name: performance_report        # rename the stream if you like
@@ -113,7 +113,21 @@ config:
     ad_ids: []
 ```
 
-All three enum lists are validated against the documented values before any request is made, so a typo fails with the supported values listed rather than a bare 400.
+All three enum lists are validated before any request is made, so a typo fails with the supported values listed rather than a bare 400.
+
+### The documented enums are incomplete
+
+The reference docs list 8 metrics and 4 dimensions. The API accepts **21 and 8**. The full sets were read out of the API's own validation error - sending a deliberately invalid value makes it enumerate everything it accepts - and then confirmed by creating a report with all of them:
+
+| | Documented | Also accepted |
+|---|---|---|
+| `dimension_granularity` | `CAMPAIGN`, `AD_GROUP`, `AD`, `PLACEMENT` | `CAMPAIGN_ID`, `AD_GROUP_ID`, `AD_ID`, `PLATFORM_TYPE` |
+| `metrics` | `IMPRESSIONS`, `CLICKS`, `CTR`, `SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`, `CONVERSIONS` | `CPA`, `RESULT`, `COST_PER_RESULT`, `LEAD_GEN_FORM_SUBMISSIONS`, `LEAD_GEN_FORM_COMPLETION_RATE`, `LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS`, `VIDEO_FORMAT_SEC_2_VIEWS`, `VIDEO_FORMAT_PERCENT_{25,50,75,100}_VIEWS`, `APP_INSTALLS`, `COST_PER_INSTALL` |
+| `time_granularity` | `DAY`, `WEEK`, `MONTH` | - |
+
+`APP_INSTALLS` and `COST_PER_INSTALL` are in the enum but gated behind an account feature flag; requesting either without it returns `REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE`. Their columns are the only ones in the list still unverified.
+
+Several metric columns do not match their enum name: `SPEND` arrives as `gross_spend`, `CONVERSIONS` as `total_conversions`, the video metrics as `video_views_at_25`/`..._2_seconds`, and `PLATFORM_TYPE` as `platform`. `LEAD_GEN_FORM_COMPLETION_RATE` is a percentage string like `CTR`.
 
 ### The reporting window is a date-time here, not a date
 
@@ -143,7 +157,7 @@ campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,star
 Sampling 48 existing reports gives the second shape and is misleading. This stream reads the first. What follows from it:
 
 - Headers are **Title Case with spaces**, so normalisation to snake_case is load-bearing, not a safeguard.
-- **No IDs are reported at all** - only `Campaign Name`, `Ad Group Name`, `Ad Name`. Rows therefore cannot be joined to the `campaigns`/`ad_groups`/`ads` streams by ID, only by name, and the primary key is built from names. Renaming an entity in NAM breaks that join and produces what look like new rows.
+- **IDs are available, though the reference docs omit them.** `dimension_granularity` accepts `CAMPAIGN_ID`, `AD_GROUP_ID` and `AD_ID` alongside the documented name variants, plus `PLATFORM_TYPE`. Requesting an id yields a `Campaign Id`/`Ad Group Id`/`Ad Id` column, so rows join to `campaigns`/`ad_groups`/`ads`/`ad_stats` by ID. The default config asks for `["AD_ID", "AD"]` and keys on the id, because ad names are **not unique** - 4 of 37 distinct names in one test account were shared by two ads each.
 - The time bucket is **`Date`**, not the `start_time`/`end_time` the scheduled reports use.
 - Two metric columns are not their enum name: `SPEND` arrives as **`gross_spend`** and `CONVERSIONS` as **`total_conversions`**.
 - **`CTR` is a percentage string** (`"1.05%"`). The tap strips the suffix but does **not** rescale: `ad_stats` reports CTR on the same percentage scale (`0.5573934` for an ad with 246 clicks on 44,134 impressions), so dividing by 100 would make the two performance streams disagree. Both therefore express CTR as a percentage value - `1.05` means 1.05%.
