@@ -1038,6 +1038,18 @@ _METRIC_DESCRIPTIONS = {
     ),
 }
 
+def _slug(value: str) -> str:
+    """Turn a report name into a stream name, e.g. "Ad Performance Report".
+
+    Args:
+        value: The configured report name.
+
+    Returns:
+        A lower snake_case stream name, or "" if nothing usable remains.
+    """
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
 #: Metrics arriving with a "%" suffix. The suffix is stripped but the value is
 #: NOT rescaled: ad_stats returns CTR on the same percentage scale (0.557 for
 #: 0.557%), so dividing by 100 here would make the two streams disagree.
@@ -1111,6 +1123,8 @@ class PerformanceReportStream(NextdoorStream):
         dimensions = list(configured.get("dimension_granularity") or ["AD_ID", "AD"])
         time_granularity = list(configured.get("time_granularity") or ["DAY"])
 
+        name = configured.get("name") or "performance report"
+
         for values, allowed, label in (
             (metrics, REPORT_METRICS, "metrics"),
             (dimensions, REPORT_DIMENSIONS, "dimension_granularity"),
@@ -1127,8 +1141,11 @@ class PerformanceReportStream(NextdoorStream):
             "metrics": metrics,
             "dimension_granularity": dimensions,
             "time_granularity": time_granularity,
-            "name": configured.get("name") or "tap-nextdoor performance report",
-            "stream_name": configured.get("stream_name") or "",
+            "name": name,
+            # The stream, and so the target table, is named after the report
+            # being configured. An explicit stream_name wins; otherwise the
+            # report's own name is slugified.
+            "stream_name": configured.get("stream_name") or _slug(name),
             "recipient_emails": list(configured.get("recipient_emails") or []),
             "campaign_ids": list(configured.get("campaign_ids") or []),
             "adgroup_ids": list(configured.get("adgroup_ids") or []),
