@@ -44,7 +44,7 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 |---|---|---|---|---|
 | `users` | The NAM user that owns the access token, and which advertisers they can reach | `GET /me` | - | FULL_TABLE |
 | `profiles` | The advertising profile behind the token, including its billing profile and whether it is an agency | `GET /me` | - | FULL_TABLE |
-| `advertisers` | Advertiser accounts the token can access, with the token holder's role on each | `GET /me` (`user.advertisers_with_access`) | - | FULL_TABLE |
+| `advertisers` | Advertiser accounts the token can access - name, website, categories, address, currency, timezone, billing - plus the token holder's role | `GET /me` + `GET /advertiser/get/{id}` | - | FULL_TABLE |
 | `campaigns` | Campaigns, with objective, status and flight dates | `GET /advertiser/campaign/list` | `advertisers` | `updated_at` |
 | `ad_groups` | Ad groups, carrying the bid, budget, placements, frequency caps and all targeting | `GET /adgroup/list` | `campaigns` | `updated_at` |
 | `ads` | Individual ads, linking an ad group to the creative it renders | `GET /ad/list` | `ad_groups` | `updated_at` |
@@ -68,7 +68,11 @@ uv run tap-nextdoor --config=ENV --discover \
 
 ### Notes on specific streams
 
-- **`advertisers`** - the Ads API has no advertiser *list* endpoint (only `advertiser/create` and `advertiser/get/{id}/stats`), so accessible advertisers are read from `/me`'s `user.advertisers_with_access` and optionally narrowed with the `advertiser_ids` setting.
+- **`advertisers`** - combines two endpoints. The Ads API has no advertiser *list* endpoint, so `/me` is the only way to discover which advertisers a token can reach; it returns just an id and the token holder's role. The detail comes from **`GET /advertiser/get/{id}`, which is undocumented** - it appears in neither the reference nor `llms.txt`, and was found by trying the `get/{id}` shape that campaigns and custom audiences use. Cost is one extra request per accessible advertiser, once per sync. Unknown keys are passed through, since an undocumented endpoint may change without notice.
+
+  Two fields are worth calling out. **`currency`** is what the bare-decimal money values on `performance_report` are denominated in - nothing else in the API tells you. **`timezone`** explains why daily reporting windows land on `23:00:00Z` in summer (`Europe/London`).
+
+  It also exposes **billing data** - `account_balance`, `billing_limit` and payment profile ids. Deselect the stream, or mask those fields, if that should not reach the warehouse.
 
 - **`performance_report`** - a **custom report defined entirely in config** (see below). This is the stream to use for ad performance: it can return a daily time series, which the stats endpoint cannot.
 

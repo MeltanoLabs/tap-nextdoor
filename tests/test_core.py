@@ -116,15 +116,22 @@ def test_advertisers_come_from_me_and_honour_the_id_filter(
     config: dict,
     nam_api,
 ) -> None:
-    """/me lists two advertisers; the config filter narrows it to one."""
-    tap = TapNextdoor(config=config, parse_env_config=False)
+    """/me lists two advertisers; the config filter narrows it to one.
 
-    # /me reports both advertisers, keyed by `id` as the live API does ...
-    advertisers = cast("list[dict]", list(tap.streams["advertisers"].get_records(None)))
-    assert [a["id"] for a in advertisers] == ["adv1", "adv2"]
+    The unfiltered case is covered by
+    :func:`test_all_advertisers_are_synced_without_a_filter`.
+    """
+    TapNextdoor(config=config, parse_env_config=False).streams["advertisers"].sync()
 
-    # ... but only the selected one is followed into the child streams.
-    tap.streams["advertisers"].sync()
+    # Only the selected advertiser has its detail fetched ...
+    detail = {
+        r.path.rsplit("/", 1)[-1]
+        for r in nam_api.request_history
+        if "/advertiser/get/" in r.path
+    }
+    assert detail == {"adv1"}
+
+    # ... and only it is followed into the child streams.
     requested = {
         r.json()["advertiser_id"]
         for r in nam_api.request_history
@@ -512,3 +519,40 @@ def test_stream_name_is_configurable(config: dict) -> None:
     renamed = TapNextdoor(config=config, parse_env_config=False)
     assert "campaign_performance_report" in renamed.streams
     assert "performance_report" not in renamed.streams
+
+
+def test_advertisers_are_enriched_with_their_detail(config: dict, nam_api) -> None:  # noqa: ARG001
+    """The undocumented /advertiser/get/{id} fills in name, currency, timezone."""
+    stream = cast(
+        "NextdoorStream",
+        TapNextdoor(config=config, parse_env_config=False).streams["advertisers"],
+    )
+    rows = [
+        stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
+        for row in stream.get_records({"advertiser_id": "adv1"})
+    ]
+    row = rows[0]
+    assert row is not None
+    assert row["advertiser_id"] == "adv1"
+    assert row["name"] == "Acme"
+    assert row["currency"] == "GBP"
+    assert row["timezone"] == "Europe/London"
+    assert row["address"]["country"] == "GB"
+    # role comes from /me, not from the advertiser record
+    assert row["role"] == "CLIENT_ADMIN"
+    # the raw `id` key is replaced, not carried through
+    assert "id" not in row
+
+
+def test_unreachable_advertiser_ids_are_reported(config: dict, nam_api, caplog) -> None:  # noqa: ARG001
+    """Configuring an advertiser the token cannot see warns rather than failing."""
+    config["advertiser_ids"] = ["adv1", "nope"]
+    stream = cast(
+        "NextdoorStream",
+        TapNextdoor(config=config, parse_env_config=False).streams["advertisers"],
+    )
+    with caplog.at_level(logging.WARNING):
+        partitions = stream.partitions
+
+    assert partitions == [{"advertiser_id": "adv1"}]
+    assert "not accessible" in caplog.text

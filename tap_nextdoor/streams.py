@@ -26,6 +26,7 @@ import io
 import re
 import typing as t
 from datetime import date, timedelta
+from functools import cached_property
 
 import requests
 from singer_sdk import typing as th
@@ -122,46 +123,152 @@ class ProfileStream(MeStream):
     ).to_dict()
 
 
-class AdvertiserStream(MeStream):
-    """Advertisers the access token has access to.
+class AdvertiserStream(NextdoorStream):
+    """Advertisers the access token has access to, with their full detail.
 
-    The Ads API exposes ``advertiser/create`` and ``advertiser/get/{id}/stats``
-    but no advertiser list endpoint, so the accessible advertisers are read out
-    of ``/me``'s ``user.advertisers_with_access`` and optionally narrowed by the
-    ``advertiser_ids`` config setting.
+    Two endpoints are combined. ``/me`` is the only way to discover *which*
+    advertisers a token can reach, and it reports just an id and the token
+    holder's role. The detail - name, currency, timezone, billing - comes from
+    ``GET /advertiser/get/{id}``, which is undocumented: it appears in neither
+    the reference nor ``llms.txt``, and was found by trying the ``get/{id}``
+    shape that campaigns and custom audiences use. Being undocumented it may
+    change without notice, so unknown keys are passed through.
+
+    Cost is one extra request per accessible advertiser, once per sync.
     """
 
     name = "advertisers"
-    records_jsonpath = "$.user.advertisers_with_access[*]"
+    path = "/advertiser/get/{advertiser_id}"
     primary_keys = ("advertiser_id",)
+    records_jsonpath = "$"
+
+    _money = 'Money as a currency-prefixed string, e.g. "GBP 10.00"'
+
     schema = th.PropertiesList(
         th.Property(
             "advertiser_id",
             th.StringType,
             required=True,
-            description=(
-                "Advertiser ID. Sourced from `id` in the API response, which "
-                "the reference docs call advertiser_id."
-            ),
+            description="Advertiser ID. Sourced from `id` in the API response.",
         ),
         th.Property(
             "role",
             th.StringType,
-            description="The token holder's role on this advertiser, e.g. CLIENT_ADMIN",
+            description=(
+                "The token holder's role on this advertiser, e.g. CLIENT_ADMIN. "
+                "From /me, not from the advertiser record."
+            ),
         ),
+        th.Property("name", th.StringType, description="Advertiser name"),
+        th.Property(
+            "profile_id",
+            th.StringType,
+            description="Profile that owns this advertiser; joins to profiles",
+        ),
+        th.Property("website_url", th.StringType, description="Advertiser website"),
+        th.Property(
+            "categories",
+            th.ArrayType(th.StringType),
+            description='Business categories, e.g. "Energy & Utilities"',
+        ),
+        th.Property(
+            "address",
+            description="Registered address; fields are often blank",
+            wrapped=th.ObjectType(
+                th.Property("street_address", th.StringType),
+                th.Property("street_address_2", th.StringType),
+                th.Property("city", th.StringType),
+                th.Property("state", th.StringType),
+                th.Property("postal_code", th.StringType),
+                th.Property("country", th.StringType),
+            ),
+        ),
+        th.Property(
+            "country",
+            th.StringType,
+            description='Country enum, e.g. UNITED_KINGDOM (address.country is "GB")',
+        ),
+        th.Property(
+            "currency",
+            th.StringType,
+            description=(
+                "Account currency, e.g. GBP. This is what the bare decimal "
+                "money values on the report streams are denominated in."
+            ),
+        ),
+        th.Property(
+            "timezone",
+            th.StringType,
+            description=(
+                "Account timezone, e.g. Europe/London. Explains why daily "
+                "reporting windows land on 23:00:00Z in summer."
+            ),
+        ),
+        th.Property("billing_limit", th.StringType, description=_money),
+        th.Property("account_balance", th.StringType, description=_money),
+        th.Property("payment_profile_id", th.StringType, description="Payment profile"),
+        th.Property(
+            "bill_to_payment_profile_id",
+            th.StringType,
+            description="Payment profile billed for this advertiser",
+        ),
+        additional_properties=True,
     ).to_dict()
 
-    def post_process(self, row: dict, context: Context | None = None) -> dict | None:
-        """Normalise the id field and apply the ``advertiser_ids`` filter.
+    @cached_property
+    def _accessible(self) -> dict[str, str]:
+        """Return ``{advertiser_id: role}`` for every advertiser ``/me`` reports.
 
-        The reference docs describe these entries as ``advertiser_id``, but the
-        live API returns ``id``; both are accepted here.
+        Narrowed by the ``advertiser_ids`` setting when it is set.
         """
+        response = self._request(
+            self.build_prepared_request(
+                method="GET",
+                url=f"{self.url_base}/me",
+                headers=self.http_headers,
+            ),
+            None,
+        )
+        user = response.json().get("user") or {}
+        # The reference docs call this advertiser_id; the live API returns id.
+        roles = {
+            entry.get("id") or entry.get("advertiser_id"): entry.get("role")
+            for entry in user.get("advertisers_with_access") or []
+        }
+        if selected := self.config.get("advertiser_ids"):
+            roles = {k: v for k, v in roles.items() if k in selected}
+            if missing := set(selected) - set(roles):
+                self.logger.warning(
+                    "advertiser_ids %s are not accessible to this token.",
+                    sorted(missing),
+                )
+        return roles
+
+    @property
+    def partitions(self) -> list[dict] | None:
+        """One partition per accessible advertiser, so each is fetched once."""
+        return [{"advertiser_id": advertiser_id} for advertiser_id in self._accessible]
+
+    def get_new_paginator(self) -> SinglePagePaginator:
+        """Return a single-page paginator - get-by-id is not paginated."""
+        return SinglePagePaginator()
+
+    def prepare_request_payload(
+        self,
+        context: Context | None,  # noqa: ARG002
+        next_page_token: str | None,  # noqa: ARG002
+    ) -> dict | None:
+        """Return no request body - the id is a path parameter."""
+        return None
+
+    def post_process(self, row: dict, context: Context | None = None) -> dict | None:
+        """Normalise the id and attach the role that only /me knows about."""
         row = super().post_process(row, context) or row
-        row["advertiser_id"] = row.pop("id", row.get("advertiser_id"))
-        selected = self.config.get("advertiser_ids")
-        if selected and row["advertiser_id"] not in selected:
-            return None
+        advertiser_id = str(
+            row.pop("id", None) or (context or {}).get("advertiser_id") or ""
+        )
+        row["advertiser_id"] = advertiser_id
+        row["role"] = self._accessible.get(advertiser_id)
         return row
 
     def get_child_context(self, record: dict, context: Context | None) -> dict:  # noqa: ARG002
@@ -1037,6 +1144,7 @@ _METRIC_DESCRIPTIONS = {
         "Cost per app install. Requires an account feature flag; unverified."
     ),
 }
+
 
 def _slug(value: str) -> str:
     """Turn a report name into a stream name, e.g. "Ad Performance Report".

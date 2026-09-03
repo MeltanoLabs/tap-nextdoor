@@ -73,6 +73,33 @@ def nam_api(requests_mock):
             },
         },
     )
+    for advertiser_id, advertiser_name in (("adv1", "Acme"), ("adv2", "Globex")):
+        requests_mock.get(
+            f"{BASE}/advertiser/get/{advertiser_id}",
+            json={
+                "id": advertiser_id,
+                "profile_id": "p1",
+                "name": advertiser_name,
+                "website_url": f"https://{advertiser_name.lower()}.example.com",
+                "categories": ["Energy & Utilities"],
+                "address": {
+                    "street_address": "",
+                    "street_address_2": "",
+                    "city": "",
+                    "state": "",
+                    "postal_code": "",
+                    "country": "GB",
+                },
+                "billing_limit": "GBP 10.00",
+                "payment_profile_id": "pp1",
+                "bill_to_payment_profile_id": "pp1",
+                "account_balance": "GBP 46066.60",
+                "country": "UNITED_KINGDOM",
+                "currency": "GBP",
+                "timezone": "Europe/London",
+            },
+        )
+
     # Two pages: a full page with a cursor, then a short final page.
     requests_mock.get(
         f"{BASE}/advertiser/campaign/list",
