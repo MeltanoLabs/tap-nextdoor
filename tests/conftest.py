@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 BASE = "https://ads.nextdoor.com/v2/api"
+V3_BASE = "https://ads.nextdoor.com/api/v3"
 
 SAMPLE_CONFIG = {
     "access_token": "test-access-token",
@@ -263,6 +264,44 @@ def nam_api(requests_mock):
             "Billable Spend,CPM,CPC,Total Conversions\n"
             "Ad,ad1,2026-07-01,72914,762,1.05%,373.36,371.93,5.10,0.49,2\n"
             "Ad,ad1,2026-07-02,293,1,0.34%,1.29,1.29,4.42,1.29,1\n"
+        ),
+    )
+    # v3 report builder. The reference presents creation as synchronous, so
+    # the default fixture hands back a COMPLETED report with its download_url;
+    # test_v3_report_is_polled_until_completed re-registers these to exercise
+    # the STARTED -> IN_PROGRESS -> COMPLETED path instead. Both advertisers
+    # are mocked, since a full sync visits each one.
+    for advertiser_id in ("adv1", "adv2"):
+        requests_mock.post(
+            f"{V3_BASE}/advertisers/{advertiser_id}/reports",
+            json={
+                "id": "repv3",
+                "advertiser_id": advertiser_id,
+                "name": "performance report v3",
+                "status": "COMPLETED",
+                "output_format": "CSV",
+                "download_url": "https://example.com/report-v3.csv",
+            },
+        )
+        requests_mock.get(
+            f"{V3_BASE}/advertisers/{advertiser_id}/reports/repv3",
+            json={
+                "id": "repv3",
+                "advertiser_id": advertiser_id,
+                "status": "COMPLETED",
+                "output_format": "CSV",
+                "download_url": "https://example.com/report-v3.csv",
+            },
+        )
+    requests_mock.get(
+        "https://example.com/report-v3.csv",
+        # Same Title Case header convention as the v2 report, plus the
+        # creative columns v2 cannot produce.
+        text=(
+            "Date,Ad Id,Ad Name,Creative Id,Creative Name,Impressions,Clicks,"
+            "CTR,Gross Spend\n"
+            "2026-07-01,ad1,Ad,cr1,Creative,72914,762,1.05%,373.36\n"
+            "2026-07-02,ad1,Ad,cr1,Creative,293,1,0.34%,1.29\n"
         ),
     )
     requests_mock.get(

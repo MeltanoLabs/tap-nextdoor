@@ -52,6 +52,7 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 | `reports` | Saved and scheduled report definitions with their CSV download URLs. Definitions only, no metrics | `GET /advertiser/reporting/list` | `advertisers` | FULL_TABLE |
 | `ad_stats` | Daily performance per ad - spend, impressions, clicks, CTR, CPC, CPM and a full conversion breakdown | `GET /ad/get/{id}/stats` | `ads` | `date` |
 | `performance_report` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions and time buckets. Renameable via `report.stream_name`. **Creates a report in the account and emails it** | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
+| `performance_report_v3` | The same idea on Nextdoor's **v3** report API, which accepts many more breakdowns - creative, demographics, household/member geo - and per-conversion-event metrics. Renameable via `report_v3.stream_name`. **Creates a report in the account and emails it** | `POST /api/v3/advertisers/{id}/reports` + poll + CSV download | `advertisers` | FULL_TABLE |
 | `custom_audiences` | Custom audiences referenced by ad groups, with their type and description | `GET /custom_audience/get/{id}` | `ad_groups` | `updated_at` |
 
 ### Stream fields
@@ -202,6 +203,100 @@ Four things follow, all of which the schema reflects:
 
 `start_time` is kept as a string because its format varies between reports - `2025-09-30` in some, `2025-09-06 12:00 AM` in others - and neither is RFC 3339. The schema still allows additional properties, so a column combination not seen in those 48 samples passes through rather than being dropped.
 
+## The `performance_report_v3` stream
+
+Nextdoor has a second, newer report builder on a different API surface: `POST /api/v3/advertisers/{advertiserId}/reports`. It is the same product as `/reporting/create` - an ad hoc report generated server-side and handed back as a presigned CSV URL - but it accepts **29 dimensions and roughly 70 metrics** where v2 accepts 8 and 21. Both streams are enabled by default and can run side by side. Disable either by deselecting it in the catalog.
+
+Reach for v3 when you need a breakdown v2 cannot express:
+
+| | v2 `performance_report` | v3 `performance_report_v3` |
+|---|---|---|
+| Endpoint | `POST /v2/api/reporting/create` | `POST /api/v3/advertisers/{advertiserId}/reports` |
+| Advertiser | body field `advertiser_id` | path parameter |
+| Window | flat `start_time`/`end_time` | nested `date_time_range.{start_date_time,end_date_time}` |
+| Time bucket | separate `time_granularity` setting | a **dimension** (`DAY`/`WEEK`/`MONTH`) |
+| Dimensions | 8 | 29 |
+| Metrics | 21 | ~70 |
+| Scoping | `campaign_ids`/`adgroup_ids`/`ad_ids` (by **ID**) | `filters` with `CONTAINS` (by **name**) |
+| Report type | n/a | `DELIVERY_METRICS_REPORT`, `LEAD_GEN_FORM_RESULTS_REPORT`, `DCO_ENTITY_REPORT` |
+| Output | CSV | CSV or XLSX (the tap always asks for CSV) |
+| Response | `id` + `download_url` | `id` + `download_url` + `status`, so it is polled |
+
+Auth is the same bearer token, so no extra credential is needed.
+
+### What v3 adds
+
+- **Creative**: `CREATIVE`, `CREATIVE_ID` - the breakdown v2 has no dimension for at all.
+- **Demographics**: `GENDER`, `AGE`, `HOUSEHOLD_INCOME`, `HOMEOWNER`, `DEVICE`, `INTEREST`.
+- **Geo**, at household and member level: `HOUSEHOLD_{SUBDIVISION,DMA,POSTAL_CODE,CITY}`, `USER_{COUNTRY,STATE,DMA,POSTAL_CODE,CITY}`.
+- **`CONVERSION_EVENT_NAME`**, and per-event metrics: `PURCHASE`, `LEAD`, `SIGN_UP`, `ADD_TO_CART`, `INITIATE_CHECKOUT`, `SEARCH`, `PAGE_VIEW`, `VIEW_CONTENT`, `ADD_TO_WISHLIST`, `SUBSCRIBE` and `CUSTOM_CONVERSION_1..10`, each with a `COST_PER_*` twin.
+- **Reach**: `UNIQUE_IMPRESSIONS`, `AVG_FREQUENCY`; **attribution**: `VIEW_THROUGH_CONVERSIONS`, `CLICK_THROUGH_CONVERSIONS`; **carousel**: `CAROUSEL_ENGAGEMENT`, `CAROUSEL_CARD_{IMPRESSIONS,CLICKS,CTR}`.
+
+Going the other way, `APP_INSTALLS` and `COST_PER_INSTALL` - the two feature-flagged metrics on v2 - are **not** in the v3 enum.
+
+### Do you actually need it for creative-level data?
+
+Often not. The `ads` stream already carries a scalar `creative_id`, so an ad-grain v2 report joins to it:
+
+```sql
+select r.*, a.creative_id, c.name as creative_name
+from performance_report r
+join ads a on a.id = r.ad_id
+join creatives c on c.id = a.creative_id
+```
+
+That is exact, not an approximation. Use v3's `CREATIVE_ID` when you want creative-grain rows without the join, or when you need a dimension the join cannot supply - demographics or geo.
+
+### Configuration
+
+```yaml
+config:
+  start_date: '2026-07-01'
+  end_date: '2026-07-31'      # inclusive
+  report_v3:
+    dimensions: [DAY, AD_ID, AD]   # the time bucket is a dimension here
+    metrics: [IMPRESSIONS, CLICKS, CTR, SPEND, BILLABLE_SPEND, CPM, CPC, CPA, CONVERSIONS, RESULT, COST_PER_RESULT]
+    type: DELIVERY_METRICS_REPORT
+    name: tap-nextdoor performance report v3
+    stream_name: performance_report_v3
+    recipient_emails: []           # every sync emails these
+    filters:                       # optional, matches on NAME not id
+      - attribute: CAMPAIGN        # AD, AD_GROUP, CAMPAIGN, PLACEMENT
+        operator: CONTAINS
+        options: [Brand]
+    poll_interval_seconds: 5
+    max_poll_seconds: 300
+```
+
+`metrics`, `dimensions`, `type` and each `filters` entry are validated before any request is made, so a typo fails with the supported values listed rather than a bare 400.
+
+**`metrics` does not default to the whole enum**, unlike the v2 block. It defaults to the eleven delivery metrics v2 also serves, so the two streams are comparable out of the box. The custom-conversion, carousel and lead-gen families only mean anything on accounts configured for them, and asking for a metric the account cannot serve is what v2 raises `REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE` for.
+
+**There is no id-based filter.** v3's only documented operator is `CONTAINS` over entity names, so the v2 block's `campaign_ids`/`adgroup_ids`/`ad_ids` have no direct equivalent. If you need exact id scoping, use the v2 stream.
+
+### The report is polled
+
+The reference presents creation as synchronous and returns a `download_url` in the 200. But the same response carries a `status` whose enum includes `STARTED` and `IN_PROGRESS`, so that URL cannot be trusted to be ready. The tap therefore polls `GET /api/v3/advertisers/{advertiserId}/reports/{reportId}` every `poll_interval_seconds` until the status is `COMPLETED`, then downloads.
+
+- A report already `COMPLETED` on creation is downloaded immediately, with no poll.
+- A report that ends `FAILED`, `CANCELED`, `CANCELING` or `ARCHIVED` **raises**, rather than silently syncing zero rows.
+- A report still running at `max_poll_seconds` **raises**, naming the setting to raise.
+- A response carrying no `status` at all is trusted as-is, so an undocumented shape does not fail the sync on a technicality.
+
+### Caveats - this stream is built from the spec, not from live traffic
+
+The v2 stream's enums and CSV column names were confirmed against the live API. **Everything in this stream comes from the OpenAPI reference only.** Specifically:
+
+- **The CSV header row is undocumented.** The column mapping reuses the header names verified on v2 wherever the dimension or metric is shared (`SPEND` -> `gross_spend`, `CONVERSIONS` -> `total_conversions`, `PLATFORM_TYPE` -> `platform`, the video metrics as `video_views_at_25`/`..._2_seconds`), and falls back to the lowercased enum otherwise. The new dimensions and metrics are therefore **guesses**: `CREATIVE_ID` -> `creative_id`, `GENDER` -> `gender`, `DAY`/`WEEK`/`MONTH` -> `date`, and so on.
+- The schema **allows additional properties**, so a wrong guess passes the column through untyped rather than dropping it. The cost of a wrong guess is a declared-but-always-null column alongside an undeclared real one - and, if the guess was a key column, a null in the primary key.
+- Whether the enums are complete, whether `type` is required, and whether every metric is available without an account feature flag are all unverified.
+
+When you first run this stream, check the emitted columns against the schema and correct `_V3_DIMENSION_COLUMNS`/`_V3_METRIC_COLUMNS` in `tap_nextdoor/streams.py` for anything that does not line up.
+
+### Write access
+
+Like the v2 report, this stream **writes**: each sync creates a report object on the advertiser's account and emails everyone in `recipient_emails`. Leave that list empty to skip the email. Note that reports created here do **not** appear in the `reports` stream, which lists v2 report definitions.
+
 ### Not implemented
 
 - **Targeting** - only `POST /targeting/geo/postal_code/bulk_match` exists, which is a lookup that takes input postal codes rather than an enumerable collection.
@@ -216,6 +311,8 @@ Four things follow, all of which the schema reflects:
 | `advertiser_ids` | No | Filter advertisers (and their campaigns/ad groups/ads) by ID. Defaults to every advertiser reported by `/me` |
 | `start_date` | No | Start of the `performance_report` window, as a date (`2025-01-01`). Defaults to today |
 | `end_date` | No | End of that window, inclusive. Defaults to today |
+| `report` | No | Definition of the v2 `performance_report`. See its section above |
+| `report_v3` | No | Definition of the v3 `performance_report_v3`. See its section above |
 | `page_size` | No | Records per page for the list endpoints. Defaults to 100 |
 
 A full list of supported settings and capabilities is available by running:
@@ -246,7 +343,7 @@ Getting from nothing to a running sync:
    uv run tap-nextdoor --config=ENV --catalog catalog.json | grep '"stream":"advertisers"'
    ```
 1. **Narrow the scope (recommended).** Set `advertiser_ids` to just the accounts you want. Left empty, the tap syncs every advertiser the token can see, which multiplies runtime.
-1. **Set the reporting window.** `start_date` and `end_date` bound `performance_report` and `ad_stats`. Both default to today, i.e. no history.
+1. **Set the reporting window.** `start_date` and `end_date` bound `performance_report`, `performance_report_v3` and `ad_stats`. Both default to today, i.e. no history.
 1. **Run it.**
    ```bash
    meltano run tap-nextdoor target-jsonl
@@ -269,11 +366,11 @@ Getting from nothing to a running sync:
 - The `reports` stream's `download_url` is a presigned S3 URL with embedded AWS credentials. Short-lived, but a credential in a data column - consider deselecting the stream or masking the field.
 - `users` and `profiles` carry personal data (name, email). Deselect them if you do not need them.
 
-**Write access.** `performance_report` is the only stream that writes: it creates a report in the advertiser's account and emails it to `recipient_emails`. See its section above.
+**Write access.** `performance_report` and `performance_report_v3` are the only streams that write: each creates a report in the advertiser's account and emails it to `recipient_emails`. See their sections above.
 
 ## Data recovery and backfill
 
-**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`; `ad_stats` replicates incrementally on `date`. `performance_report` and the `/me`-derived streams are full-table and re-extract their whole window every run.
+**How replication works here.** `campaigns`, `ad_groups`, `ads`, `creatives` and `custom_audiences` replicate incrementally on `updated_at`; `ad_stats` replicates incrementally on `date`. `performance_report`, `performance_report_v3` and the `/me`-derived streams are full-table and re-extract their whole window every run.
 
 **Backfilling reporting data.** Widen the window and re-run; no state changes are needed, since these streams are full-table:
 

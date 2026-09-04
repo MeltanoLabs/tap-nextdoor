@@ -52,6 +52,7 @@ EXPECTED_STREAMS = {
     "reports",
     "ad_stats",
     "performance_report",
+    "performance_report_v3",
     "custom_audiences",
 }
 
@@ -556,3 +557,280 @@ def test_unreachable_advertiser_ids_are_reported(config: dict, nam_api, caplog) 
 
     assert partitions == [{"advertiser_id": "adv1"}]
     assert "not accessible" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# v3 report builder
+# ---------------------------------------------------------------------------
+
+V3_BASE_PATH = "/api/v3/advertisers/adv1/reports"
+
+# Zero interval so the poll loop does not actually sleep in tests.
+V3_FAST_POLL = {"poll_interval_seconds": 0}
+
+
+def _v3_create_bodies(nam_api) -> list[dict]:
+    """Return the body of every v3 create-report request made."""
+    return [
+        r.json()
+        for r in nam_api.request_history
+        if r.path == V3_BASE_PATH and r.method == "POST"
+    ]
+
+
+def test_v3_report_is_advertiser_scoped_by_path(config: dict, nam_api) -> None:
+    """v3 puts the advertiser in the URL, not the body, on the /api/v3 base."""
+    config["report_v3"] = dict(V3_FAST_POLL)
+    _sync_all(config)
+
+    created = [
+        r for r in nam_api.request_history if r.method == "POST" and "/api/v3/" in r.url
+    ]
+    assert [r.url for r in created] == [
+        "https://ads.nextdoor.com/api/v3/advertisers/adv1/reports",
+    ]
+    # The advertiser is in the path, so it must not also be in the body - that
+    # is the v2 report's shape.
+    assert "advertiser_id" not in created[0].json()
+
+
+def test_v3_report_definition_comes_from_config(config: dict, nam_api) -> None:
+    """The v3 body is built from the `report_v3` block, with a nested window."""
+    config["report_v3"] = {
+        **V3_FAST_POLL,
+        "metrics": ["IMPRESSIONS", "CLICKS"],
+        "dimensions": ["DAY", "CREATIVE_ID"],
+        "name": "My v3 report",
+        "type": "DELIVERY_METRICS_REPORT",
+        "recipient_emails": ["a@example.com"],
+        "filters": [{"attribute": "CAMPAIGN", "options": ["Brand"]}],
+    }
+    _sync_all(config)
+
+    assert _v3_create_bodies(nam_api) == [
+        {
+            "name": "My v3 report",
+            "type": "DELIVERY_METRICS_REPORT",
+            "output_format": "CSV",
+            "date_time_range": {
+                "start_date_time": "2025-01-01T00:00:00+00:00",
+                # end_date is inclusive, so the bound is advanced a day.
+                "end_date_time": "2025-02-01T00:00:00+00:00",
+            },
+            "dimensions": ["DAY", "CREATIVE_ID"],
+            "metrics": ["IMPRESSIONS", "CLICKS"],
+            "recipient_emails": ["a@example.com"],
+            "filters": [
+                {"attribute": "CAMPAIGN", "operator": "CONTAINS", "options": ["Brand"]},
+            ],
+        },
+    ]
+
+
+def test_v3_report_defaults_to_day_and_ad_with_the_shared_metrics(
+    config: dict,
+    nam_api,
+) -> None:
+    """With no config the report is DAY x ad, on the metrics v2 also serves."""
+    config["report_v3"] = dict(V3_FAST_POLL)
+    _sync_all(config)
+
+    body = _v3_create_bodies(nam_api)[0]
+    assert body["dimensions"] == ["DAY", "AD_ID", "AD"]
+    assert body["metrics"] == list(streams.REPORT_V3_DEFAULT_METRICS)
+    # Not the whole enum - see REPORT_V3_DEFAULT_METRICS for why.
+    assert len(body["metrics"]) < len(streams.REPORT_V3_METRICS)
+
+
+def test_v3_report_is_polled_until_completed(config: dict, nam_api) -> None:
+    """A report created as STARTED is polled until COMPLETED, then downloaded.
+
+    The reference presents creation as synchronous, but its status enum
+    includes STARTED and IN_PROGRESS, so the stream must not assume the
+    download_url is usable on the first response.
+    """
+    nam_api.post(
+        f"https://ads.nextdoor.com{V3_BASE_PATH}",
+        json={"id": "repv3", "advertiser_id": "adv1", "status": "STARTED"},
+    )
+    nam_api.get(
+        f"https://ads.nextdoor.com{V3_BASE_PATH}/repv3",
+        [
+            {"json": {"id": "repv3", "advertiser_id": "adv1", "status": "IN_PROGRESS"}},
+            {
+                "json": {
+                    "id": "repv3",
+                    "advertiser_id": "adv1",
+                    "status": "COMPLETED",
+                    "download_url": "https://example.com/report-v3.csv",
+                },
+            },
+        ],
+    )
+    config["report_v3"] = dict(V3_FAST_POLL)
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    records = list(stream.get_records({"advertiser_id": "adv1"}))
+
+    polls = [
+        r
+        for r in nam_api.request_history
+        if r.path == f"{V3_BASE_PATH}/repv3" and r.method == "GET"
+    ]
+    # IN_PROGRESS, then COMPLETED.
+    assert len(polls) == EXPECTED_PAGES
+    assert len(records) == EXPECTED_PAGES
+
+
+def test_v3_completed_report_is_not_polled(config: dict, nam_api) -> None:
+    """A report already COMPLETED on creation is downloaded without polling."""
+    config["report_v3"] = dict(V3_FAST_POLL)
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    list(stream.get_records({"advertiser_id": "adv1"}))
+
+    assert not [
+        r
+        for r in nam_api.request_history
+        if r.path == f"{V3_BASE_PATH}/repv3" and r.method == "GET"
+    ]
+
+
+def test_v3_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # noqa: ARG001
+    """The downloaded CSV becomes records, including the creative columns."""
+    config["report_v3"] = {
+        **V3_FAST_POLL,
+        "dimensions": ["DAY", "AD_ID", "AD", "CREATIVE_ID", "CREATIVE"],
+        "metrics": ["IMPRESSIONS", "CLICKS", "CTR", "SPEND"],
+    }
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    records = list(stream.get_records({"advertiser_id": "adv1"}))
+    records = [stream.post_process(r, {"advertiser_id": "adv1"}) for r in records]
+
+    assert len(records) == EXPECTED_PAGES
+    first = records[0]
+    assert first["advertiser_id"] == "adv1"
+    assert first["report_id"] == "repv3"
+    assert first["date"] == "2026-07-01"
+    assert first["ad_id"] == "ad1"
+    # The whole point of v3: a creative breakdown the v2 report cannot produce.
+    assert first["creative_id"] == "cr1"
+    assert first["creative_name"] == "Creative"
+    assert first["impressions"] == EXPECTED_REPORT_ROWS[0]["impressions"]
+    assert first["clicks"] == EXPECTED_REPORT_ROWS[0]["clicks"]
+    # CTR keeps the percentage scale, as on the v2 report and ad_stats.
+    assert first["ctr"] == EXPECTED_REPORT_ROWS[0]["ctr"]
+    assert first["gross_spend"] == EXPECTED_REPORT_ROWS[0]["gross_spend"]
+
+
+def test_v3_primary_key_follows_dimensions(config: dict) -> None:
+    """One key column per dimension family, preferring the id over the name."""
+    config["report_v3"] = {
+        "dimensions": ["DAY", "CAMPAIGN_ID", "CAMPAIGN", "CREATIVE_ID", "GENDER"],
+    }
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    assert tuple(stream.primary_keys) == (
+        "advertiser_id",
+        "date",
+        "campaign_id",
+        "creative_id",
+        "gender",
+    )
+
+
+def test_v3_time_dimensions_share_one_date_column(config: dict) -> None:
+    """DAY, WEEK and MONTH all land in `date`, so it is declared once."""
+    config["report_v3"] = {"dimensions": ["DAY", "WEEK", "AD_ID"]}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    assert tuple(stream.primary_keys) == ("advertiser_id", "date", "ad_id")
+    assert stream.schema["properties"]["date"]["format"] == "date"
+
+
+def test_v3_creative_dimension_is_rejected_by_the_v2_report(config: dict) -> None:
+    """CREATIVE_ID is a v3 dimension; the v2 report block must still refuse it."""
+    config["report"] = {"dimension_granularity": ["CREATIVE_ID"]}
+    with pytest.raises(ValueError, match=r"Invalid report\.dimension_granularity"):
+        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+
+
+def test_v3_invalid_values_are_rejected(config: dict) -> None:
+    """Bad metrics, dimensions, types and filters all fail with a clear message."""
+    for block, pattern in (
+        ({"metrics": ["NOPE"]}, r"Invalid report_v3\.metrics"),
+        ({"dimensions": ["NOPE"]}, r"Invalid report_v3\.dimensions"),
+        ({"type": "NOPE"}, r"Invalid report_v3\.type"),
+        (
+            {"filters": [{"attribute": "CREATIVE"}]},
+            r"Invalid report_v3\.filters\[\]\.attribute",
+        ),
+    ):
+        config["report_v3"] = block
+        with pytest.raises(ValueError, match=pattern):
+            TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+
+
+def test_v3_failed_report_raises_rather_than_syncing_nothing(
+    config: dict,
+    nam_api,
+) -> None:
+    """A report that ends FAILED fails the sync instead of emitting zero rows."""
+    nam_api.post(
+        f"https://ads.nextdoor.com{V3_BASE_PATH}",
+        json={"id": "repv3", "advertiser_id": "adv1", "status": "STARTED"},
+    )
+    nam_api.get(
+        f"https://ads.nextdoor.com{V3_BASE_PATH}/repv3",
+        json={"id": "repv3", "advertiser_id": "adv1", "status": "FAILED"},
+    )
+    config["report_v3"] = dict(V3_FAST_POLL)
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    with pytest.raises(RuntimeError, match="finished with status FAILED"):
+        list(stream.get_records({"advertiser_id": "adv1"}))
+
+
+def test_v3_poll_timeout_raises(config: dict, nam_api) -> None:
+    """A report still running at max_poll_seconds fails with actionable advice."""
+    nam_api.post(
+        f"https://ads.nextdoor.com{V3_BASE_PATH}",
+        json={"id": "repv3", "advertiser_id": "adv1", "status": "IN_PROGRESS"},
+    )
+    nam_api.get(
+        f"https://ads.nextdoor.com{V3_BASE_PATH}/repv3",
+        json={"id": "repv3", "advertiser_id": "adv1", "status": "IN_PROGRESS"},
+    )
+    config["report_v3"] = {"poll_interval_seconds": 0, "max_poll_seconds": 0}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report_v3"
+    ]
+    with pytest.raises(RuntimeError, match="max_poll_seconds"):
+        list(stream.get_records({"advertiser_id": "adv1"}))
+
+
+def test_v3_stream_name_is_configurable(config: dict) -> None:
+    """report_v3.stream_name renames the stream, as on the v2 report."""
+    default = TapNextdoor(config=config, parse_env_config=False)
+    assert "performance_report_v3" in default.streams
+
+    config["report_v3"] = {"stream_name": "creative_performance_report"}
+    renamed = TapNextdoor(config=config, parse_env_config=False)
+    assert "creative_performance_report" in renamed.streams
+    assert "performance_report_v3" not in renamed.streams
+
+
+def test_v3_and_v2_reports_do_not_share_a_base_url(config: dict) -> None:
+    """The two report streams sit on different API surfaces."""
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    assert (
+        tap.streams["performance_report"].url_base == "https://ads.nextdoor.com/v2/api"
+    )
+    assert tap.streams["performance_report_v3"].url_base == streams.V3_URL_BASE

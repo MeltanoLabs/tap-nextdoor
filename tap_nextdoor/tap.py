@@ -18,6 +18,7 @@ STREAM_TYPES = [
     streams.ReportStream,
     streams.AdStatsStream,
     streams.PerformanceReportStream,
+    streams.PerformanceReportV3Stream,
     streams.CustomAudienceStream,
 ]
 
@@ -151,6 +152,120 @@ class TapNextdoor(Tap):
             description=(
                 "Definition of the custom report built by the "
                 "performance_report stream via POST /reporting/create."
+            ),
+        ),
+        th.Property(
+            "report_v3",
+            th.ObjectType(
+                th.Property(
+                    "metrics",
+                    th.ArrayType(th.StringType),
+                    description=(
+                        "Metrics to include. Supported: "
+                        + ", ".join(streams.REPORT_V3_METRICS)
+                        + ". Defaults to the delivery metrics shared with the "
+                        "v2 report: "
+                        + ", ".join(streams.REPORT_V3_DEFAULT_METRICS)
+                        + "."
+                    ),
+                    default=list(streams.REPORT_V3_DEFAULT_METRICS),
+                ),
+                th.Property(
+                    "dimensions",
+                    th.ArrayType(th.StringType),
+                    description=(
+                        "Dimensions to break the report down by, including the "
+                        "time bucket (DAY/WEEK/MONTH), which v3 treats as a "
+                        "dimension rather than a separate setting. Supported: "
+                        + ", ".join(streams.REPORT_V3_DIMENSIONS)
+                        + ". Defaults to DAY, AD_ID, AD."
+                    ),
+                    default=["DAY", "AD_ID", "AD"],
+                ),
+                th.Property(
+                    "type",
+                    th.StringType,
+                    description=(
+                        "Report category. Supported: "
+                        + ", ".join(streams.REPORT_V3_TYPES)
+                        + ". Defaults to DELIVERY_METRICS_REPORT."
+                    ),
+                    default="DELIVERY_METRICS_REPORT",
+                ),
+                th.Property(
+                    "name",
+                    th.StringType,
+                    description="Name given to the generated report in NAM.",
+                ),
+                th.Property(
+                    "stream_name",
+                    th.StringType,
+                    description=(
+                        "Override the stream's name. Defaults to performance_report_v3."
+                    ),
+                ),
+                th.Property(
+                    "recipient_emails",
+                    th.ArrayType(th.StringType),
+                    description=(
+                        "Emails the generated report is sent to. Every sync "
+                        "emails these recipients, so leave empty to skip the "
+                        "email and only download the CSV."
+                    ),
+                    default=[],
+                ),
+                th.Property(
+                    "filters",
+                    th.ArrayType(
+                        th.ObjectType(
+                            th.Property(
+                                "attribute",
+                                th.StringType,
+                                required=True,
+                            ),
+                            th.Property(
+                                "operator",
+                                th.StringType,
+                                default="CONTAINS",
+                            ),
+                            th.Property("options", th.ArrayType(th.StringType)),
+                        )
+                    ),
+                    description=(
+                        "Restrict the report by entity name, e.g. "
+                        '{"attribute": "CAMPAIGN", "operator": "CONTAINS", '
+                        '"options": ["Brand"]}. This is v3\'s only filtering '
+                        "mechanism - it matches on names, and there is no "
+                        "documented equivalent of the v2 report's "
+                        "campaign_ids/adgroup_ids/ad_ids lists."
+                    ),
+                ),
+                th.Property(
+                    "poll_interval_seconds",
+                    th.IntegerType,
+                    description=(
+                        "Seconds between status checks while the report is "
+                        "generating. Defaults to 5."
+                    ),
+                    default=5,
+                ),
+                th.Property(
+                    "max_poll_seconds",
+                    th.IntegerType,
+                    description=(
+                        "How long to wait for the report to reach COMPLETED "
+                        "before failing the sync. Defaults to 300."
+                    ),
+                    default=300,
+                ),
+            ),
+            title="Ad Performance Report (v3)",
+            description=(
+                "Definition of the custom report built by the "
+                "performance_report_v3 stream via POST "
+                "/api/v3/advertisers/{advertiserId}/reports. Accepts more "
+                "dimensions and metrics than the v2 `report` block above, "
+                "notably CREATIVE_ID, demographics and geo."
             ),
         ),
         th.Property(
