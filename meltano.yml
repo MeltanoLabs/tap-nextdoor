@@ -56,10 +56,13 @@ plugins:
       label: Ad Performance Report
       description: >
         Definition of the custom report built by the performance_report
-        stream via POST /reporting/create. Keys: metrics, dimension_granularity,
-        time_granularity, name, stream_name, recipient_emails, campaign_ids,
-        adgroup_ids, ad_ids. Set stream_name to match the chosen granularity,
-        e.g. campaign_performance_report. NOTE: each sync creates a report in
+        stream via POST /api/v3/advertisers/{advertiserId}/reports. Keys:
+        metrics, dimensions, type, name, stream_name, recipient_emails,
+        filters, window_days, poll_interval_seconds, max_poll_seconds (default 1800 -
+        report generation is asynchronous and often takes minutes). The time bucket
+        (DAY/WEEK/MONTH) is a dimension, not a separate setting. Set
+        stream_name to match the chosen granularity, e.g.
+        creative_performance_report. NOTE: each sync creates a report in
         the advertiser's account and emails it to recipient_emails.
 
     - name: lookback_days

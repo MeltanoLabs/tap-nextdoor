@@ -18,7 +18,6 @@ STREAM_TYPES = [
     streams.ReportStream,
     streams.AdStatsStream,
     streams.PerformanceReportStream,
-    streams.PerformanceReportV3Stream,
     streams.CustomAudienceStream,
 ]
 
@@ -84,100 +83,21 @@ class TapNextdoor(Tap):
                     description=(
                         "Metrics to include. Supported: "
                         + ", ".join(streams.REPORT_METRICS)
-                        + ". Defaults to all of them."
-                    ),
-                    default=list(streams.REPORT_METRICS),
-                ),
-                th.Property(
-                    "dimension_granularity",
-                    th.ArrayType(th.StringType),
-                    description=(
-                        "Dimensions to break the report down by. Supported: "
-                        + ", ".join(streams.REPORT_DIMENSIONS)
-                        + ". Defaults to AD."
-                    ),
-                    default=["AD"],
-                ),
-                th.Property(
-                    "time_granularity",
-                    th.ArrayType(th.StringType),
-                    description=(
-                        "Time bucket for each row. Supported: "
-                        + ", ".join(streams.REPORT_TIME_GRANULARITIES)
-                        + ". Defaults to DAY."
-                    ),
-                    default=["DAY"],
-                ),
-                th.Property(
-                    "name",
-                    th.StringType,
-                    description="Name given to the generated report in NAM.",
-                ),
-                th.Property(
-                    "stream_name",
-                    th.StringType,
-                    description=(
-                        "Override the stream's name. Defaults to "
-                        "performance_report; set it to match the chosen "
-                        "granularity, e.g. campaign_performance_report."
-                    ),
-                ),
-                th.Property(
-                    "recipient_emails",
-                    th.ArrayType(th.StringType),
-                    description=(
-                        "Emails the generated report is sent to. Every sync "
-                        "emails these recipients, so leave empty to skip the "
-                        "email and only download the CSV."
-                    ),
-                    default=[],
-                ),
-                th.Property(
-                    "campaign_ids",
-                    th.ArrayType(th.StringType),
-                    description="Restrict the report to these campaigns.",
-                ),
-                th.Property(
-                    "adgroup_ids",
-                    th.ArrayType(th.StringType),
-                    description="Restrict the report to these ad groups.",
-                ),
-                th.Property(
-                    "ad_ids",
-                    th.ArrayType(th.StringType),
-                    description="Restrict the report to these ads.",
-                ),
-            ),
-            title="Ad Performance Report",
-            description=(
-                "Definition of the custom report built by the "
-                "performance_report stream via POST /reporting/create."
-            ),
-        ),
-        th.Property(
-            "report_v3",
-            th.ObjectType(
-                th.Property(
-                    "metrics",
-                    th.ArrayType(th.StringType),
-                    description=(
-                        "Metrics to include. Supported: "
-                        + ", ".join(streams.REPORT_V3_METRICS)
-                        + ". Defaults to the delivery metrics shared with the "
-                        "v2 report: "
-                        + ", ".join(streams.REPORT_V3_DEFAULT_METRICS)
+                        + ". Defaults to the eleven delivery metrics "
+                        "confirmed against a live account: "
+                        + ", ".join(streams.REPORT_DEFAULT_METRICS)
                         + "."
                     ),
-                    default=list(streams.REPORT_V3_DEFAULT_METRICS),
+                    default=list(streams.REPORT_DEFAULT_METRICS),
                 ),
                 th.Property(
                     "dimensions",
                     th.ArrayType(th.StringType),
                     description=(
-                        "Dimensions to break the report down by, including the "
-                        "time bucket (DAY/WEEK/MONTH), which v3 treats as a "
-                        "dimension rather than a separate setting. Supported: "
-                        + ", ".join(streams.REPORT_V3_DIMENSIONS)
+                        "Dimensions to break the report down by, including "
+                        "the time bucket - DAY, WEEK and MONTH are dimensions "
+                        "here, not a separate setting. Supported: "
+                        + ", ".join(streams.REPORT_DIMENSIONS)
                         + ". Defaults to DAY, AD_ID, AD."
                     ),
                     default=["DAY", "AD_ID", "AD"],
@@ -187,7 +107,7 @@ class TapNextdoor(Tap):
                     th.StringType,
                     description=(
                         "Report category. Supported: "
-                        + ", ".join(streams.REPORT_V3_TYPES)
+                        + ", ".join(streams.REPORT_TYPES)
                         + ". Defaults to DELIVERY_METRICS_REPORT."
                     ),
                     default="DELIVERY_METRICS_REPORT",
@@ -201,7 +121,9 @@ class TapNextdoor(Tap):
                     "stream_name",
                     th.StringType,
                     description=(
-                        "Override the stream's name. Defaults to performance_report_v3."
+                        "Override the stream's name. Defaults to "
+                        "performance_report; set it to match the chosen "
+                        "granularity, e.g. creative_performance_report."
                     ),
                 ),
                 th.Property(
@@ -234,10 +156,23 @@ class TapNextdoor(Tap):
                     description=(
                         "Restrict the report by entity name, e.g. "
                         '{"attribute": "CAMPAIGN", "operator": "CONTAINS", '
-                        '"options": ["Brand"]}. This is v3\'s only filtering '
-                        "mechanism - it matches on names, and there is no "
-                        "documented equivalent of the v2 report's "
-                        "campaign_ids/adgroup_ids/ad_ids lists."
+                        '"options": ["Brand"]}. This is the endpoint\'s only '
+                        "filtering mechanism and it matches on names; there is "
+                        "no documented way to filter by ID."
+                    ),
+                ),
+                th.Property(
+                    "window_days",
+                    th.IntegerType,
+                    description=(
+                        "Split the reporting window into slices of this many "
+                        "days, building one report per slice. Generation time "
+                        "grows with the window and the number of dimensions, "
+                        "so a year at a fine grain asked for in one report may "
+                        "never finish; 31 is a good starting point. Requires a "
+                        "time bucket (DAY/WEEK/MONTH) in dimensions, since "
+                        "otherwise every slice emits the same primary key. "
+                        "Unset means one report for the whole window."
                     ),
                 ),
                 th.Property(
@@ -254,18 +189,18 @@ class TapNextdoor(Tap):
                     th.IntegerType,
                     description=(
                         "How long to wait for the report to reach COMPLETED "
-                        "before failing the sync. Defaults to 300."
+                        "before failing the sync. Generation is asynchronous "
+                        "and a wide window at a fine grain can take many "
+                        "minutes. Defaults to 1800 (30 minutes)."
                     ),
-                    default=300,
+                    default=1800,
                 ),
             ),
-            title="Ad Performance Report (v3)",
+            title="Ad Performance Report",
             description=(
                 "Definition of the custom report built by the "
-                "performance_report_v3 stream via POST "
-                "/api/v3/advertisers/{advertiserId}/reports. Accepts more "
-                "dimensions and metrics than the v2 `report` block above, "
-                "notably CREATIVE_ID, demographics and geo."
+                "performance_report stream via POST "
+                "/api/v3/advertisers/{advertiserId}/reports."
             ),
         ),
         th.Property(
@@ -273,10 +208,10 @@ class TapNextdoor(Tap):
             th.IntegerType,
             title="Lookback Days",
             description=(
-                "How far before the bookmark the ad_stats stream restarts on "
-                "an incremental run. Ad metrics are restated as conversions "
-                "are attributed after the fact, so recent days are "
-                "re-fetched. Defaults to 7."
+                "How far before the bookmark the ad_stats and "
+                "performance_report streams restart on an incremental run. Ad "
+                "metrics are restated as conversions are attributed after the "
+                "fact, so recent days are re-fetched. Defaults to 7."
             ),
             default=7,
         ),
