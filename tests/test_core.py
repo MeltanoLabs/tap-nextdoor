@@ -224,98 +224,6 @@ def test_custom_audiences_are_fetched_once_per_id(config: dict, nam_api) -> None
     assert len(calls) == 1
 
 
-def test_report_definition_comes_from_config(config: dict, nam_api) -> None:
-    """The report body is built from the `report` config block."""
-    config["report"] = {
-        "metrics": ["IMPRESSIONS", "CLICKS", "SPEND"],
-        "dimension_granularity": ["CAMPAIGN", "AD"],
-        "time_granularity": ["DAY"],
-        "name": "My report",
-        "recipient_emails": ["someone@example.com"],
-        "campaign_ids": ["camp1"],
-    }
-    tap = TapNextdoor(config=config, parse_env_config=False)
-    tap.streams["advertisers"].sync()
-
-    created = [
-        r.json()
-        for r in nam_api.request_history
-        if r.path == "/v2/api/reporting/create"
-    ]
-    assert created[0] == {
-        "advertiser_id": "adv1",
-        "name": "My report",
-        "recipient_emails": ["someone@example.com"],
-        "dimension_granularity": ["CAMPAIGN", "AD"],
-        "time_granularity": ["DAY"],
-        "metrics": ["IMPRESSIONS", "CLICKS", "SPEND"],
-        # Offset-bearing date-times, and an exclusive upper bound one day
-        # past the inclusive end_date setting.
-        "start_time": "2025-01-01T00:00:00+00:00",
-        "end_time": "2025-02-01T00:00:00+00:00",
-        "campaign_ids": ["camp1"],
-    }
-
-
-def test_report_defaults_to_all_metrics_by_ad_and_day(config: dict, nam_api) -> None:
-    """With no report config, every metric is requested by ad id/name and DAY."""
-    tap = TapNextdoor(config=config, parse_env_config=False)
-    tap.streams["advertisers"].sync()
-
-    body = next(
-        r.json()
-        for r in nam_api.request_history
-        if r.path == "/v2/api/reporting/create"
-    )
-    assert body["metrics"] == list(streams.REPORT_METRICS)
-    assert body["dimension_granularity"] == ["AD_ID", "AD"]
-    assert body["time_granularity"] == ["DAY"]
-    assert body["recipient_emails"] == []
-
-
-def test_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # noqa: ARG001
-    """CSV headers are snake_cased and numeric metrics are cast."""
-    tap = TapNextdoor(config=config, parse_env_config=False)
-    stream = tap.streams["performance_report"]
-    rows = [
-        stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
-        for row in stream.get_records({"advertiser_id": "adv1"})
-    ]
-    assert len(rows) == len(EXPECTED_REPORT_ROWS)
-    first = rows[0]
-    assert first is not None
-    assert first["date"] == "2026-07-01"
-    assert first["ad_name"] == "Ad"
-    assert first["ad_id"] == "ad1"
-    assert first["impressions"] == EXPECTED_REPORT_ROWS[0]["impressions"]
-    assert first["clicks"] == EXPECTED_REPORT_ROWS[0]["clicks"]
-    assert first["ctr"] == EXPECTED_REPORT_ROWS[0]["ctr"]
-    # The report CSV carries bare decimals, unlike the /stats endpoint.
-    assert first["gross_spend"] == EXPECTED_REPORT_ROWS[0]["gross_spend"]
-    assert first["report_id"] == "rep1"
-
-
-def test_invalid_report_metric_is_rejected(config: dict) -> None:
-    """A misspelled metric fails fast with the supported values listed."""
-    config["report"] = {"metrics": ["IMPRESSIONS", "SPENDD"]}
-    with pytest.raises(ValueError, match=r"Invalid report\.metrics"):
-        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
-
-
-def test_report_primary_key_follows_dimensions(config: dict) -> None:
-    """The key is advertiser + time bucket + one id per requested dimension."""
-    config["report"] = {"dimension_granularity": ["CAMPAIGN", "AD_GROUP"]}
-    stream = TapNextdoor(config=config, parse_env_config=False).streams[
-        "performance_report"
-    ]
-    assert tuple(stream.primary_keys) == (
-        "advertiser_id",
-        "date",
-        "campaign_name",
-        "ad_group_name",
-    )
-
-
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [
@@ -362,76 +270,6 @@ def test_unparseable_start_date_is_rejected_clearly(config: dict, nam_api) -> No
     )
     with pytest.raises(ValueError, match="ISO-8601 date or date-time"):
         stream.window_date("start_date")
-
-
-def test_report_money_metrics_are_numeric(config: dict, nam_api) -> None:  # noqa: ARG001
-    """Report spend is a bare decimal, unlike the /stats endpoint's "GBP 0"."""
-    stream = TapNextdoor(config=config, parse_env_config=False).streams[
-        "performance_report"
-    ]
-    rows = [
-        stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
-        for row in stream.get_records({"advertiser_id": "adv1"})
-    ]
-    first = rows[0]
-    assert first is not None
-    expected = EXPECTED_REPORT_ROWS[0]
-    assert first["gross_spend"] == expected["gross_spend"]
-    assert first["billable_spend"] == expected["billable_spend"]
-    assert first["ctr"] == expected["ctr"]
-    assert first["impressions"] == expected["impressions"]
-    assert isinstance(first["impressions"], int)
-
-
-def test_report_columns_are_names_not_ids(config: dict, nam_api) -> None:  # noqa: ARG001
-    """The report CSV carries dimension names only - it reports no IDs."""
-    config["report"] = {"dimension_granularity": ["CAMPAIGN", "AD_GROUP", "AD"]}
-    props = (
-        TapNextdoor(config=config, parse_env_config=False)
-        .streams["performance_report"]
-        .schema["properties"]
-    )
-    assert {"campaign_name", "ad_group_name", "ad_name"} <= set(props)
-    assert not {"campaign_id", "ad_group_id", "adgroup_id", "ad_id"} & set(props)
-
-
-def test_report_ctr_keeps_its_percentage_scale(config: dict, nam_api) -> None:  # noqa: ARG001
-    """CTR arrives as "1.05%"; the suffix is stripped but the scale is kept.
-
-    ad_stats reports CTR on the same percentage scale - 0.5573934 for an ad
-    with 246 clicks on 44,134 impressions - so rescaling here would make the
-    two performance streams disagree.
-    """
-    stream = TapNextdoor(config=config, parse_env_config=False).streams[
-        "performance_report"
-    ]
-    rows = [
-        stream.post_process(cast("dict", row), {"advertiser_id": "adv1"})
-        for row in stream.get_records({"advertiser_id": "adv1"})
-    ]
-    first = rows[0]
-    assert first is not None
-    assert first["ctr"] == EXPECTED_REPORT_ROWS[0]["ctr"]
-
-
-def test_report_window_is_an_offset_bearing_datetime(config: dict, nam_api) -> None:
-    """reporting/create rejects bare dates, so the window must carry an offset.
-
-    Verified against the live API: "2026-07-01" fails with "could not be
-    parsed at index 10" and "2026-07-01T00:00:00" fails at index 19.
-    """
-    config["start_date"] = "2026-07-01"
-    config["end_date"] = "2026-07-31"
-    TapNextdoor(config=config, parse_env_config=False).streams["advertisers"].sync()
-
-    body = next(
-        r.json()
-        for r in nam_api.request_history
-        if r.path == "/v2/api/reporting/create"
-    )
-    assert body["start_time"] == "2026-07-01T00:00:00+00:00"
-    # end_date is inclusive, so the exclusive upper bound is the next day.
-    assert body["end_time"] == "2026-08-01T00:00:00+00:00"
 
 
 def test_ad_stats_still_uses_plain_local_dates(config: dict, nam_api) -> None:
@@ -507,20 +345,6 @@ def test_ad_stats_warns_when_the_window_is_empty(
     assert "is after end_date" in caplog.text
 
 
-def test_stream_name_is_configurable(config: dict) -> None:
-    """report.stream_name renames the stream, so it can match the granularity."""
-    default = TapNextdoor(config=config, parse_env_config=False)
-    assert "performance_report" in default.streams
-
-    config["report"] = {
-        "dimension_granularity": ["CAMPAIGN"],
-        "stream_name": "campaign_performance_report",
-    }
-    renamed = TapNextdoor(config=config, parse_env_config=False)
-    assert "campaign_performance_report" in renamed.streams
-    assert "performance_report" not in renamed.streams
-
-
 def test_advertisers_are_enriched_with_their_detail(config: dict, nam_api) -> None:  # noqa: ARG001
     """The undocumented /advertiser/get/{id} fills in name, currency, timezone."""
     stream = cast(
@@ -556,3 +380,625 @@ def test_unreachable_advertiser_ids_are_reported(config: dict, nam_api, caplog) 
 
     assert partitions == [{"advertiser_id": "adv1"}]
     assert "not accessible" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# performance_report - the v3 report builder
+# ---------------------------------------------------------------------------
+
+REPORTS_PATH = "/api/v3/advertisers/adv1/reports"
+
+
+def _create_bodies(nam_api) -> list[dict]:
+    """Return the body of every create-report request made."""
+    return [
+        r.json()
+        for r in nam_api.request_history
+        if r.path == REPORTS_PATH and r.method == "POST"
+    ]
+
+
+def test_report_is_advertiser_scoped_by_path(config: dict, nam_api) -> None:
+    """The advertiser is in the URL, not the body, on the /api/v3 base."""
+    config["report"] = {}
+    _sync_all(config)
+
+    created = [
+        r for r in nam_api.request_history if r.method == "POST" and "/api/v3/" in r.url
+    ]
+    assert [r.url for r in created] == [
+        "https://ads.nextdoor.com/api/v3/advertisers/adv1/reports",
+    ]
+    # The advertiser is in the path, so it must not also be in the body.
+    assert "advertiser_id" not in created[0].json()
+
+
+def test_report_definition_comes_from_config(config: dict, nam_api) -> None:
+    """The body is built from the `report` block, with a nested window."""
+    config["report"] = {
+        "metrics": ["IMPRESSIONS", "CLICKS"],
+        "dimensions": ["DAY", "CREATIVE_ID"],
+        "name": "My report",
+        "type": "DELIVERY_METRICS_REPORT",
+        "recipient_emails": ["a@example.com"],
+        "filters": [{"attribute": "CAMPAIGN", "options": ["Brand"]}],
+    }
+    _sync_all(config)
+
+    assert _create_bodies(nam_api) == [
+        {
+            # The window is stamped in because the API puts neither a date
+            # range nor a timestamp on a report object, and they accumulate.
+            "name": "My report 2025-01-01..2025-01-31",
+            "type": "DELIVERY_METRICS_REPORT",
+            "output_format": "CSV",
+            "date_time_range": {
+                "start_date_time": "2025-01-01T00:00:00+00:00",
+                # end_date is inclusive, so the bound is advanced a day.
+                "end_date_time": "2025-02-01T00:00:00+00:00",
+            },
+            "dimensions": ["DAY", "CREATIVE_ID"],
+            "metrics": ["IMPRESSIONS", "CLICKS"],
+            "recipient_emails": ["a@example.com"],
+            "filters": [
+                {"attribute": "CAMPAIGN", "operator": "CONTAINS", "options": ["Brand"]},
+            ],
+        },
+    ]
+
+
+def test_report_defaults_to_day_and_ad_with_the_delivery_metrics(
+    config: dict,
+    nam_api,
+) -> None:
+    """With no config the report is DAY x ad, on the delivery metrics."""
+    config["report"] = {}
+    _sync_all(config)
+
+    body = _create_bodies(nam_api)[0]
+    assert body["dimensions"] == ["DAY", "AD_ID", "AD"]
+    assert body["metrics"] == list(streams.REPORT_DEFAULT_METRICS)
+    # Not the whole enum - see REPORT_DEFAULT_METRICS for why.
+    assert len(body["metrics"]) < len(streams.REPORT_METRICS)
+
+
+def test_report_is_polled_until_completed(config: dict, nam_api) -> None:
+    """A report created as STARTED is polled until COMPLETED, then downloaded.
+
+    The reference presents creation as synchronous, but its status enum
+    includes STARTED and IN_PROGRESS, so the stream must not assume the
+    download_url is usable on the first response.
+    """
+    nam_api.post(
+        f"https://ads.nextdoor.com{REPORTS_PATH}",
+        json={"id": "rep1", "advertiser_id": "adv1", "status": "STARTED"},
+    )
+    nam_api.get(
+        f"https://ads.nextdoor.com{REPORTS_PATH}/rep1",
+        [
+            {"json": {"id": "rep1", "advertiser_id": "adv1", "status": "IN_PROGRESS"}},
+            {
+                "json": {
+                    "id": "rep1",
+                    "advertiser_id": "adv1",
+                    "status": "COMPLETED",
+                    "download_url": "https://example.com/report.csv",
+                },
+            },
+        ],
+    )
+    config["report"] = {}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    records = list(stream.get_records({"advertiser_id": "adv1"}))
+
+    polls = [
+        r
+        for r in nam_api.request_history
+        if r.path == f"{REPORTS_PATH}/rep1" and r.method == "GET"
+    ]
+    # IN_PROGRESS, then COMPLETED.
+    assert len(polls) == EXPECTED_PAGES
+    assert len(records) == EXPECTED_PAGES
+
+
+def test_completed_report_is_not_polled(config: dict, nam_api) -> None:
+    """A report already COMPLETED on creation is downloaded without polling."""
+    config["report"] = {}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    list(stream.get_records({"advertiser_id": "adv1"}))
+
+    assert not [
+        r
+        for r in nam_api.request_history
+        if r.path == f"{REPORTS_PATH}/rep1" and r.method == "GET"
+    ]
+
+
+def test_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # noqa: ARG001
+    """The downloaded CSV becomes records, including the creative columns."""
+    config["report"] = {
+        "dimensions": ["DAY", "AD_ID", "AD", "CREATIVE_ID", "CREATIVE"],
+        "metrics": ["IMPRESSIONS", "CLICKS", "CTR", "SPEND"],
+    }
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    records = list(stream.get_records({"advertiser_id": "adv1"}))
+    records = [stream.post_process(r, {"advertiser_id": "adv1"}) for r in records]
+
+    assert len(records) == EXPECTED_PAGES
+    first = records[0]
+    assert first["advertiser_id"] == "adv1"
+    assert first["report_id"] == "rep1"
+    assert first["date"] == "2026-07-01"
+    assert first["ad_id"] == "ad1"
+    # v3 returns "Ad"/"Creative", not "Ad Name"/"Creative Name" as v2 does.
+    assert first["ad"] == "Ad"
+    assert first["creative"] == "Creative"
+    # The creative breakdown, which the older v2 report builder cannot produce.
+    assert first["creative_id"] == "cr1"
+    assert first["impressions"] == EXPECTED_REPORT_ROWS[0]["impressions"]
+    assert first["clicks"] == EXPECTED_REPORT_ROWS[0]["clicks"]
+    # CTR keeps the percentage scale, matching ad_stats.
+    assert first["ctr"] == EXPECTED_REPORT_ROWS[0]["ctr"]
+    assert first["gross_spend"] == EXPECTED_REPORT_ROWS[0]["gross_spend"]
+
+
+def test_report_primary_key_follows_dimensions(config: dict) -> None:
+    """One key column per dimension family, preferring the id over the name."""
+    config["report"] = {
+        "dimensions": ["DAY", "CAMPAIGN_ID", "CAMPAIGN", "CREATIVE_ID", "GENDER"],
+        # Explicit, because the default list carries BILLABLE_SPEND, which
+        # conflicts with CREATIVE_ID.
+        "metrics": ["IMPRESSIONS"],
+    }
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    assert tuple(stream.primary_keys) == (
+        "advertiser_id",
+        "date",
+        "campaign_id",
+        "creative_id",
+        "gender",
+    )
+
+
+def test_report_time_dimensions_share_one_date_column(config: dict) -> None:
+    """DAY, WEEK and MONTH all land in `date`, so it is declared once."""
+    config["report"] = {"dimensions": ["DAY", "WEEK", "AD_ID"]}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    assert tuple(stream.primary_keys) == ("advertiser_id", "date", "ad_id")
+    assert stream.schema["properties"]["date"]["format"] == "date"
+
+
+def test_window_days_splits_the_run_into_one_report_per_slice(
+    config: dict,
+    nam_api,
+) -> None:
+    """A window longer than window_days becomes several smaller reports."""
+    # conftest window is 2025-01-01..2025-01-31, i.e. 31 days.
+    config["report"] = {"dimensions": ["DAY", "AD_ID"], "window_days": 10}
+    _sync_all(config)
+
+    ranges = [b["date_time_range"] for b in _create_bodies(nam_api)]
+    # 31 days in slices of 10 -> 10 + 10 + 10 + 1. Each end bound is advanced
+    # a day, because end_date is inclusive.
+    assert ranges == [
+        {
+            "start_date_time": "2025-01-01T00:00:00+00:00",
+            "end_date_time": "2025-01-11T00:00:00+00:00",
+        },
+        {
+            "start_date_time": "2025-01-11T00:00:00+00:00",
+            "end_date_time": "2025-01-21T00:00:00+00:00",
+        },
+        {
+            "start_date_time": "2025-01-21T00:00:00+00:00",
+            "end_date_time": "2025-01-31T00:00:00+00:00",
+        },
+        {
+            "start_date_time": "2025-01-31T00:00:00+00:00",
+            "end_date_time": "2025-02-01T00:00:00+00:00",
+        },
+    ]
+
+
+def test_window_days_unset_builds_one_report(config: dict, nam_api) -> None:
+    """Without window_days the whole window goes in a single report."""
+    config["report"] = {}
+    _sync_all(config)
+
+    assert [b["date_time_range"] for b in _create_bodies(nam_api)] == [
+        {
+            "start_date_time": "2025-01-01T00:00:00+00:00",
+            "end_date_time": "2025-02-01T00:00:00+00:00",
+        },
+    ]
+
+
+def test_report_is_incremental_on_date_when_dimensions_carry_day(
+    config: dict,
+) -> None:
+    """A DAY report replicates incrementally on the `date` column."""
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+
+    assert stream.replication_key == "date"
+    assert stream.replication_method == "INCREMENTAL"
+    # The bookmark column has to be in the key too, or the target cannot
+    # upsert the restated rows a lookback re-emits.
+    assert "date" in stream.primary_keys
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        pytest.param(["AD_ID", "AD"], id="no-time-bucket"),
+        # WEEK/MONTH bucket values are unverified on this endpoint - see
+        # _INCREMENTAL_TIME_BUCKET.
+        pytest.param(["WEEK", "AD_ID"], id="week"),
+        pytest.param(["MONTH", "AD_ID"], id="month"),
+    ],
+)
+def test_report_is_full_table_without_a_day_dimension(
+    config: dict,
+    dimensions: list[str],
+) -> None:
+    """Anything but DAY leaves the stream on FULL_TABLE."""
+    config["report"] = {"dimensions": dimensions}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+
+    assert stream.replication_key is None
+    assert stream.replication_method == "FULL_TABLE"
+
+
+def test_report_resumes_from_the_bookmark_with_a_lookback(
+    config: dict,
+    nam_api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incremental run asks for a shorter window, not the whole history.
+
+    Generation time grows with the window, so this is the stream's main cost
+    lever. `lookback_days` of synced history is re-requested, because report
+    metrics are restated as conversions are attributed late.
+    """
+    config["lookback_days"] = 3
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    stream = cast("NextdoorStream", tap.streams["performance_report"])
+    # Stand in for a stored bookmark, rather than hand-building state JSON.
+    monkeypatch.setattr(
+        stream,
+        "get_starting_replication_key_value",
+        lambda _context: "2025-01-20",
+    )
+    list(stream.get_records({"advertiser_id": "adv1"}))
+
+    assert [b["date_time_range"] for b in _create_bodies(nam_api)] == [
+        {
+            # 3 days before the bookmark, not the configured 2025-01-01.
+            "start_date_time": "2025-01-17T00:00:00+00:00",
+            "end_date_time": "2025-02-01T00:00:00+00:00",
+        },
+    ]
+
+
+def test_report_bookmark_only_moves_the_start_forward(
+    config: dict,
+    nam_api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bookmark earlier than start_date does not widen the window.
+
+    Otherwise lowering start_date would be undone by an old bookmark, and the
+    tap would generate a report for a period the user excluded.
+    """
+    config["lookback_days"] = 7
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    stream = cast("NextdoorStream", tap.streams["performance_report"])
+    monkeypatch.setattr(
+        stream,
+        "get_starting_replication_key_value",
+        lambda _context: "2025-01-02",
+    )
+    list(stream.get_records({"advertiser_id": "adv1"}))
+
+    starts = [b["date_time_range"]["start_date_time"] for b in _create_bodies(nam_api)]
+    assert starts == ["2025-01-01T00:00:00+00:00"]
+
+
+def test_report_syncs_nothing_when_the_bookmark_passes_end_date(
+    config: dict,
+    nam_api,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog,
+) -> None:
+    """A bookmark past end_date creates no report, and says why."""
+    config["lookback_days"] = 0
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    stream = cast("NextdoorStream", tap.streams["performance_report"])
+    monkeypatch.setattr(
+        stream,
+        "get_starting_replication_key_value",
+        lambda _context: "2025-03-01",
+    )
+    with caplog.at_level(logging.WARNING):
+        assert list(stream.get_records({"advertiser_id": "adv1"})) == []
+
+    assert "nothing to sync" in caplog.text
+    assert not _create_bodies(nam_api), "no report object should be created"
+
+
+def test_window_days_requires_a_time_dimension(config: dict) -> None:
+    """Slicing without DAY/WEEK/MONTH would collide every slice's keys."""
+    config["report"] = {"dimensions": ["AD_ID"], "window_days": 10}
+    with pytest.raises(ValueError, match="must include a time bucket"):
+        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+
+
+def test_window_days_must_be_positive(config: dict) -> None:
+    """A negative slice size is rejected rather than looping forever."""
+    config["report"] = {"dimensions": ["DAY", "AD_ID"], "window_days": -1}
+    with pytest.raises(ValueError, match="at least 1"):
+        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+
+
+def test_empty_report_logs_its_csv_header(config: dict, nam_api, caplog) -> None:
+    """A zero-row report logs the header, so column names can be confirmed.
+
+    An empty report is not an error, but the target writes no file for it,
+    which looks identical to a broken sync. The header row survives an empty
+    report and is the only place the CSV's real column names appear.
+    """
+    nam_api.get(
+        "https://example.com/report.csv",
+        text="Date,Ad Id,Creative Id,Impressions\n",
+    )
+    config["report"] = {}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    with caplog.at_level(logging.WARNING):
+        assert list(stream.get_records({"advertiser_id": "adv1"})) == []
+
+    assert "0 data rows" in caplog.text
+    # Both the raw header and what it normalises to, since the mapping is
+    # what needs correcting when a guess is wrong.
+    assert "'Creative Id'" in caplog.text
+    assert "creative_id" in caplog.text
+
+
+def test_non_numeric_metric_cell_becomes_null(config: dict, nam_api) -> None:  # noqa: ARG001
+    """A numeric column holding "N/A" nulls that cell, not the whole sync.
+
+    Seen live: "N/A" appeared partway through a report and took a ten-minute
+    sync down with a ValueError, discarding every row already fetched.
+    """
+    config["report"] = {
+        "dimensions": ["DAY", "AD_ID"],
+        "metrics": ["IMPRESSIONS", "SPEND"],
+    }
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    records = [
+        stream.post_process(r, {"advertiser_id": "adv1"})
+        for r in stream.get_records({"advertiser_id": "adv1"})
+    ]
+
+    assert len(records) == EXPECTED_PAGES
+    assert records[0]["gross_spend"] == EXPECTED_REPORT_ROWS[0]["gross_spend"]
+    # The second row's Gross Spend is "N/A" in the fixture.
+    assert records[1]["gross_spend"] is None
+    # The rest of that row survives.
+    assert records[1]["impressions"] == EXPECTED_REPORT_ROWS[1]["impressions"]
+
+
+def test_unknown_non_numeric_is_nulled_with_a_warning(config: dict, caplog) -> None:
+    """An unrecognised placeholder warns rather than raising."""
+    config["report"] = {"dimensions": ["DAY"], "metrics": ["IMPRESSIONS"]}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    with caplog.at_level(logging.WARNING):
+        assert stream._as_number("IMPRESSIONS", "impressions", "roughly 12") is None  # noqa: SLF001
+    assert "is not a number" in caplog.text
+    # Known placeholders are silent.
+    with caplog.at_level(logging.WARNING):
+        caplog.clear()
+        assert stream._as_number("IMPRESSIONS", "impressions", "N/A") is None  # noqa: SLF001
+    assert caplog.text == ""
+
+
+def test_report_name_carries_the_window(config: dict, nam_api) -> None:
+    """The window is stamped into the NAM report name.
+
+    The API exposes neither a created-at nor a date range on a report, and the
+    objects accumulate in the account, so the name is the only thing that can
+    identify the period one covers.
+    """
+    config["report"] = {"dimensions": ["DAY", "AD_ID"], "window_days": 20}
+    _sync_all(config)
+
+    assert [b["name"] for b in _create_bodies(nam_api)] == [
+        "performance report 2025-01-01..2025-01-20",
+        "performance report 2025-01-21..2025-01-31",
+    ]
+
+
+def test_stream_name_is_unaffected_by_the_window_stamp(config: dict) -> None:
+    """Stamping the window into the report name must not rename the table."""
+    config["report"] = {"name": "Ad Performance Report"}
+    tap = TapNextdoor(config=config, parse_env_config=False)
+    assert "ad_performance_report" in tap.streams
+
+
+def test_conflicting_dimension_and_metric_are_rejected(config: dict) -> None:
+    """CREATIVE_ID with BILLABLE_SPEND fails at startup, not mid-sync.
+
+    The API rejects the pair with REPORT_BUILDER_CONFLICT_PARAMETER: billable
+    spend attaches above the creative, so it cannot be split per creative.
+    """
+    config["report"] = {
+        "dimensions": ["DAY", "CREATIVE_ID"],
+        "metrics": ["IMPRESSIONS", "BILLABLE_SPEND"],
+    }
+    with pytest.raises(ValueError, match="REPORT_BUILDER_CONFLICT_PARAMETER") as spelt:
+        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+    assert "from report.metrics" in str(spelt.value)
+
+
+def test_conflict_from_the_default_metrics_names_the_default(config: dict) -> None:
+    """Asking only for CREATIVE_ID still conflicts, via the default metrics.
+
+    The SDK fills the config_jsonschema default in, so the message must blame
+    the default list rather than a `report.metrics` the user never wrote.
+    """
+    config["report"] = {"dimensions": ["DAY", "CREATIVE_ID"]}
+    with pytest.raises(ValueError, match="REPORT_BUILDER_CONFLICT_PARAMETER") as spelt:
+        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+    assert "the default metric list" in str(spelt.value)
+
+
+def test_creative_id_allows_gross_spend(config: dict) -> None:
+    """Only BILLABLE_SPEND conflicts with CREATIVE_ID; SPEND is fine."""
+    config["report"] = {
+        "dimensions": ["DAY", "CREATIVE_ID"],
+        "metrics": ["IMPRESSIONS", "SPEND"],
+    }
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    assert "gross_spend" in stream.schema["properties"]
+
+
+def test_retired_v2_report_settings_are_rejected_with_their_replacement(
+    config: dict,
+) -> None:
+    """A config written for the old v2 builder fails loudly, not silently.
+
+    The v3 endpoint has no equivalent of dimension_granularity,
+    time_granularity or the *_ids filters, so a carried-over config would
+    otherwise be ignored and the report quietly built with defaults.
+    """
+    config["report"] = {"dimension_granularity": ["AD_ID"], "ad_ids": ["ad1"]}
+    with pytest.raises(ValueError, match=r"not supported by the v3 report") as excinfo:
+        TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+
+    message = str(excinfo.value)
+    # The error names both offenders and what replaces each.
+    assert "report.dimension_granularity -> use report.dimensions" in message
+    assert "report.ad_ids -> use report.filters" in message
+
+
+def test_invalid_report_values_are_rejected(config: dict) -> None:
+    """Bad metrics, dimensions, types and filters all fail with a clear message."""
+    for block, pattern in (
+        ({"metrics": ["NOPE"]}, r"Invalid report\.metrics"),
+        ({"dimensions": ["NOPE"]}, r"Invalid report\.dimensions"),
+        ({"type": "NOPE"}, r"Invalid report\.type"),
+        (
+            {"filters": [{"attribute": "CREATIVE"}]},
+            r"Invalid report\.filters\[\]\.attribute",
+        ),
+    ):
+        config["report"] = block
+        with pytest.raises(ValueError, match=pattern):
+            TapNextdoor(config=config, parse_env_config=False).streams  # noqa: B018
+
+
+def test_failed_report_raises_rather_than_syncing_nothing(
+    config: dict,
+    nam_api,
+) -> None:
+    """A report that ends FAILED fails the sync instead of emitting zero rows."""
+    nam_api.post(
+        f"https://ads.nextdoor.com{REPORTS_PATH}",
+        json={"id": "rep1", "advertiser_id": "adv1", "status": "STARTED"},
+    )
+    nam_api.get(
+        f"https://ads.nextdoor.com{REPORTS_PATH}/rep1",
+        json={"id": "rep1", "advertiser_id": "adv1", "status": "FAILED"},
+    )
+    config["report"] = {}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    with pytest.raises(RuntimeError, match="finished with status FAILED"):
+        list(stream.get_records({"advertiser_id": "adv1"}))
+
+
+def test_poll_timeout_raises(
+    config: dict,
+    nam_api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report still running at the ceiling fails with actionable advice.
+
+    The advice has to be actionable *without* a setting to raise, since the
+    ceiling is a module constant now: a report still running at 30 minutes
+    wants a narrower window, not a longer wait.
+    """
+    nam_api.post(
+        f"https://ads.nextdoor.com{REPORTS_PATH}",
+        json={"id": "rep1", "advertiser_id": "adv1", "status": "IN_PROGRESS"},
+    )
+    nam_api.get(
+        f"https://ads.nextdoor.com{REPORTS_PATH}/rep1",
+        json={"id": "rep1", "advertiser_id": "adv1", "status": "IN_PROGRESS"},
+    )
+    monkeypatch.setattr(streams, "MAX_POLL_SECONDS", 0)
+    config["report"] = {}
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    with pytest.raises(RuntimeError, match="Narrow the window"):
+        list(stream.get_records({"advertiser_id": "adv1"}))
+
+
+def test_poll_settings_are_not_config(config: dict) -> None:
+    """The poll interval and ceiling are constants, not `report` settings.
+
+    They were config once. A stale config carrying them must not look like it
+    is being honoured, and must not fail either - the SDK would reject an
+    unknown key only if the schema forbade extras.
+    """
+    assert (
+        "poll_interval_seconds"
+        not in TapNextdoor.config_jsonschema["properties"]["report"]["properties"]
+    )
+    assert (
+        "max_poll_seconds"
+        not in TapNextdoor.config_jsonschema["properties"]["report"]["properties"]
+    )
+
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    assert "poll_interval_seconds" not in stream.report_config
+    assert "max_poll_seconds" not in stream.report_config
+
+
+def test_stream_name_is_configurable(config: dict) -> None:
+    """report.stream_name renames the stream, so it can match the granularity."""
+    default = TapNextdoor(config=config, parse_env_config=False)
+    assert "performance_report" in default.streams
+
+    config["report"] = {"stream_name": "creative_performance_report"}
+    renamed = TapNextdoor(config=config, parse_env_config=False)
+    assert "creative_performance_report" in renamed.streams
+    assert "performance_report" not in renamed.streams

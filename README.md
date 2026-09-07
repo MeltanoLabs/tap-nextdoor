@@ -51,7 +51,7 @@ Fields returned live but undocumented (`sub_objective`, `special_ad_category`, `
 | `creatives` | Creative assets - headline, body, CTA, image and logo URLs, click and impression trackers | `GET /advertiser/creative/list` | `advertisers` | `updated_at` |
 | `reports` | Saved and scheduled report definitions with their CSV download URLs. Definitions only, no metrics | `GET /advertiser/reporting/list` | `advertisers` | FULL_TABLE |
 | `ad_stats` | Daily performance per ad - spend, impressions, clicks, CTR, CPC, CPM and a full conversion breakdown | `GET /ad/get/{id}/stats` | `ads` | `date` |
-| `performance_report` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions and time buckets. Renameable via `report.stream_name`. **Creates a report in the account and emails it** | `POST /reporting/create` + CSV download | `advertisers` | FULL_TABLE |
+| `performance_report` | A custom performance report defined in config: chosen metrics, broken down by chosen dimensions - including creative, demographics and household/member geo. Renameable via `report.stream_name`. **Creates a report in the account and emails it** | `POST /api/v3/advertisers/{id}/reports` + poll + CSV download | `advertisers` | `date` (with `DAY`) |
 | `custom_audiences` | Custom audiences referenced by ad groups, with their type and description | `GET /custom_audience/get/{id}` | `ad_groups` | `updated_at` |
 
 ### Stream fields
@@ -80,127 +80,177 @@ uv run tap-nextdoor --config=ENV --discover \
 
   It replicates incrementally on `date`. Because ad metrics are restated as conversions are attributed late, an incremental run restarts `lookback_days` (default 7) before the bookmark rather than trusting recent days as final. A single shared bookmark is used rather than one per ad; the stream is left unsorted, so the SDK holds the starting value steady for the whole run and only finalises it at the end, meaning ads synced later still get the full window.
 
-  **Cost scales with ads x days: one request per ad per day.** For 271 ads that is 271 requests for a daily incremental run, but ~8,400 for a month-long backfill and ~99,000 for a year. Widen `start_date` deliberately, and prefer `performance_report` (2 requests per advertiser) when a conversion breakdown and real ad IDs are not needed.
+  **Cost scales with ads x days: one request per ad per day.** For 271 ads that is 271 requests for a daily incremental run, but ~8,400 for a month-long backfill and ~99,000 for a year. Widen `start_date` deliberately, and prefer `performance_report` (a handful of requests per advertiser, whatever the window) when a conversion breakdown and real ad IDs are not needed.
 
   Its schema was built from a live response, since the OpenAPI definition declares an empty object. The same `{entity}/get/{id}/stats` shape exists for advertisers, campaigns, ad groups and creatives if entity-level metrics are wanted later.
 
-  For a daily time series, this stream would need to loop the window day-by-day (one request per ad per day) or use `POST /reporting/create` with `time_granularity: DAY` and fetch the resulting CSV. Neither is implemented.
+  For a daily time series, this stream would need to loop the window day-by-day (one request per ad per day) or use the report builder with a `DAY` dimension and fetch the resulting CSV - which is what `performance_report` does. Looping the window here is not implemented.
 
-- **`reports`** - lists saved/scheduled report definitions and their `download_url`; it contains no metrics. Creating reports (`POST /reporting/create`, with `dimension_granularity`, `time_granularity` and `metrics` enums) is a write operation and out of scope for a tap.
+- **`reports`** - lists saved/scheduled report definitions and their `download_url`; it contains no metrics. It lists v2 report definitions only, so reports created by `performance_report` - a v3 object - do not appear here.
 
 - **`custom_audiences`** - there is no list endpoint, so audiences are fetched by the ids found on their ad groups (`targeting.custom_audience_targeting`). Each id is requested once, even when shared across ad groups. Not yet exercised against an ad group that has audiences attached - every ad group seen so far has empty include/exclude lists.
-
 ## The `performance_report` stream
 
-Unlike every other stream, this one **writes**. `POST /reporting/create` generates an ad hoc report, emails it to `recipient_emails`, and returns a presigned `download_url` for a CSV, which the tap downloads and emits row by row.
+Unlike every other stream, this one **writes**. It creates an ad hoc report on the advertiser's account, emails it to `recipient_emails`, and returns a presigned `download_url` for a CSV, which the tap downloads and emits row by row.
 
 Two consequences:
 
-- **Each sync creates a report object in the advertiser's account**, and they accumulate - the `reports` stream lists every one created so far. On an account with existing scheduled reports this can already be several thousand.
-- **Each sync emails everyone in `recipient_emails`.** Leave it empty to skip the email; the field is not marked required in the OpenAPI schema, though the docs say the report "will be sent to the recipient emails".
+- **Each sync creates a report object in the advertiser's account**, and they accumulate. They are v3 objects, so they do *not* appear in the `reports` stream, which lists v2 report definitions.
+- **Each sync emails everyone in `recipient_emails`.** Leave it empty to skip the email; the field is not marked required in the OpenAPI schema.
 
-The report is defined by the `report` config block:
+### Why the v3 endpoint
+
+Nextdoor has two report builders. The older `POST /v2/api/reporting/create` sits on the same base URL as every other stream in this tap and accepts **8 dimensions and 21 metrics**. This stream uses `POST /api/v3/advertisers/{advertiserId}/reports` instead, which accepts **29 and roughly 70**. Auth is the same bearer token.
+
+What v3 buys you, none of which v2 can express:
+
+- **Creative**: `CREATIVE`, `CREATIVE_ID`.
+- **Demographics**: `GENDER`, `AGE`, `HOUSEHOLD_INCOME`, `HOMEOWNER`, `DEVICE`, `INTEREST`.
+- **Geo**, at household and member level: `HOUSEHOLD_{SUBDIVISION,DMA,POSTAL_CODE,CITY}`, `USER_{COUNTRY,STATE,DMA,POSTAL_CODE,CITY}`.
+- **`CONVERSION_EVENT_NAME`**, and per-event metrics: `PURCHASE`, `LEAD`, `SIGN_UP`, `ADD_TO_CART`, `INITIATE_CHECKOUT`, `SEARCH`, `PAGE_VIEW`, `VIEW_CONTENT`, `ADD_TO_WISHLIST`, `SUBSCRIBE` and `CUSTOM_CONVERSION_1..10`, each with a `COST_PER_*` twin.
+- **Reach**: `UNIQUE_IMPRESSIONS`, `AVG_FREQUENCY`. **Attribution**: `VIEW_THROUGH_CONVERSIONS`, `CLICK_THROUGH_CONVERSIONS`. **Carousel**: `CAROUSEL_ENGAGEMENT`, `CAROUSEL_CARD_{IMPRESSIONS,CLICKS,CTR}`.
+
+Two things the v2 builder had that v3 does not:
+
+- **`APP_INSTALLS` and `COST_PER_INSTALL`** are not in the v3 metric enum.
+- **ID-based filtering.** v2 took `campaign_ids`/`adgroup_ids`/`ad_ids`; v3's only documented operator is `CONTAINS` over entity *names*. If you need exact ID scoping, filter downstream instead.
+
+### Configuration
 
 ```yaml
 config:
   start_date: '2026-07-01'   # report window start
   end_date: '2026-07-31'     # inclusive
   report:
-    metrics: [IMPRESSIONS, CLICKS, CTR, SPEND, BILLABLE_SPEND, CPM, CPC, CONVERSIONS]
-    dimension_granularity: [AD_ID, AD]   # + CAMPAIGN(_ID), AD_GROUP(_ID), PLATFORM_TYPE, PLACEMENT
-    time_granularity: [DAY]          # DAY, WEEK, MONTH
+    dimensions: [DAY, AD_ID, AD]   # the time bucket is a dimension here
+    metrics: [IMPRESSIONS, CLICKS, CTR, SPEND, BILLABLE_SPEND, CPM, CPC, CPA, CONVERSIONS, RESULT, COST_PER_RESULT]
+    type: DELIVERY_METRICS_REPORT  # or LEAD_GEN_FORM_RESULTS_REPORT, DCO_ENTITY_REPORT
     name: tap-nextdoor performance report   # report name in NAM
-    stream_name: performance_report        # rename the stream if you like
+    stream_name: performance_report         # rename the stream if you like
     recipient_emails: []                    # every sync emails these
-    campaign_ids: []                 # optional filters
-    adgroup_ids: []
-    ad_ids: []
+    filters:                                # optional, matches on NAME not id
+      - attribute: CAMPAIGN                 # AD, AD_GROUP, CAMPAIGN, PLACEMENT
+        operator: CONTAINS
+        options: [Brand]
+    window_days: 31                # split long windows into monthly reports
 ```
 
-All three enum lists are validated before any request is made, so a typo fails with the supported values listed rather than a bare 400.
+`metrics`, `dimensions`, `type` and each `filters` entry are validated before any request is made, so a typo fails with the supported values listed rather than a bare 400.
 
-### The documented enums are incomplete
+**`metrics` does not default to the whole enum.** It defaults to the eleven delivery metrics confirmed against a live account. The custom-conversion, carousel and lead-gen families only mean anything on accounts configured for them, and asking for a metric the account cannot serve is what the v2 builder raises `REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE` for.
 
-The reference docs list 8 metrics and 4 dimensions. The API accepts **21 and 8**. The full sets were read out of the API's own validation error - sending a deliberately invalid value makes it enumerate everything it accepts - and then confirmed by creating a report with all of them:
+**The time bucket is a dimension.** `DAY`, `WEEK` and `MONTH` go in `dimensions`, not in a separate setting, and all three land in the same `date` column.
 
-| | Documented | Also accepted |
+**Configs written for the v2 builder are rejected, not ignored.** `dimension_granularity`, `time_granularity`, `campaign_ids`, `adgroup_ids` and `ad_ids` have no v3 equivalent, so the stream fails at startup naming each offender and its replacement rather than silently building the report with defaults.
+
+### Some dimensions and metrics conflict
+
+The API refuses certain combinations outright, with `REPORT_BUILDER_CONFLICT_PARAMETER`:
+
+| Dimension | Metric | Why |
 |---|---|---|
-| `dimension_granularity` | `CAMPAIGN`, `AD_GROUP`, `AD`, `PLACEMENT` | `CAMPAIGN_ID`, `AD_GROUP_ID`, `AD_ID`, `PLATFORM_TYPE` |
-| `metrics` | `IMPRESSIONS`, `CLICKS`, `CTR`, `SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`, `CONVERSIONS` | `CPA`, `RESULT`, `COST_PER_RESULT`, `LEAD_GEN_FORM_SUBMISSIONS`, `LEAD_GEN_FORM_COMPLETION_RATE`, `LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS`, `VIDEO_FORMAT_SEC_2_VIEWS`, `VIDEO_FORMAT_PERCENT_{25,50,75,100}_VIEWS`, `APP_INSTALLS`, `COST_PER_INSTALL` |
-| `time_granularity` | `DAY`, `WEEK`, `MONTH` | - |
+| `CREATIVE_ID` | `BILLABLE_SPEND` | Billable spend attaches above the creative, so it cannot be split per creative. Gross `SPEND` is fine. |
 
-`APP_INSTALLS` and `COST_PER_INSTALL` are in the enum but gated behind an account feature flag; requesting either without it returns `REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE`. Their columns are the only ones in the list still unverified.
+These are checked before the request is made, so a conflicting config fails at startup rather than mid-sync. The API reports **one conflict per request**, so the table above is near-certainly incomplete - it holds what has actually been observed live. Add new pairs to `_CONFLICTING_PAIRS` in `tap_nextdoor/streams.py` as they surface.
 
-Several metric columns do not match their enum name: `SPEND` arrives as `gross_spend`, `CONVERSIONS` as `total_conversions`, the video metrics as `video_views_at_25`/`..._2_seconds`, and `PLATFORM_TYPE` as `platform`. `LEAD_GEN_FORM_COMPLETION_RATE` is a percentage string like `CTR`.
+### Do you need `CREATIVE_ID`, or will a join do?
+
+Often a join will. The `ads` stream already carries a scalar `creative_id`, so an ad-grain report joins to it:
+
+```sql
+select r.*, a.creative_id, c.name as creative_name
+from performance_report r
+join ads a on a.id = r.ad_id
+join creatives c on c.id = a.creative_id
+```
+
+That is exact, not an approximation - one ad renders one creative. Ask for `CREATIVE_ID` when you want creative-grain rows without the join, or a dimension the join cannot supply, such as demographics or geo.
+
+### Syncing more than a month: `window_days`
+
+Report generation is asynchronous and its cost grows with **both** the window length and the number of dimensions. A year at `DAY x AD_ID x AD x PLACEMENT x CREATIVE_ID` asked for as one report may take far longer than any sensible timeout, and a single failure loses the whole run.
+
+`window_days` splits the window into slices and builds **one report per slice**:
+
+```yaml
+config:
+  start_date: '2025-09-01'
+  end_date: '2026-08-31'
+  report:
+    dimensions: [DAY, AD_ID, AD, PLACEMENT, CREATIVE_ID]
+    window_days: 31        # -> 12 reports per advertiser, each ~a month
+```
+
+Slices are contiguous and non-overlapping - `2025-09-01..2025-10-01`, `2025-10-02..2025-11-01`, and so on - so rows accumulate into one table without gaps or double-counting. Unset, the whole window goes in a single report, which is what you want for a short window.
+
+Two constraints:
+
+- **A time bucket is required.** `dimensions` must contain `DAY`, `WEEK` or `MONTH`. Without one, every slice emits the same primary key with different values and the rows collide instead of accumulating. This is rejected at startup.
+- **Each slice is a report object.** `window_days: 31` over a year creates **12 reports per advertiser per sync**, and they accumulate in the account. Multiply by the number of advertisers - narrow `advertiser_ids` if you do not need them all.
+
+Slices are synced oldest first, and the count is logged at the start of each advertiser.
+
+### Incremental replication
+
+The stream is **INCREMENTAL on `date`** when `dimensions` includes `DAY`, and FULL_TABLE otherwise. A report with no time bucket is a single aggregate row per entity for the whole window, so there is nothing to bookmark.
+
+This is the cheapest lever on the stream's cost. Generation time grows with the window length, so resuming from the bookmark shortens the part that is actually slow - a daily run asks for a few days instead of regenerating the whole history.
+
+`lookback_days` (default 7) of already-synced history is re-requested on every incremental run, because report metrics are **restated as conversions are attributed late**. The re-emitted rows carry the same primary key, so a target that upserts on it replaces the earlier values rather than double-counting. `date` is part of the key for exactly this reason.
+
+The bookmark only ever moves the start *forward*: lowering `start_date` is not undone by an old bookmark, and a bookmark past `end_date` creates no report at all and logs why.
+
+**`WEEK` and `MONTH` stay FULL_TABLE.** A `DAY` report's `date` is a plain ISO date (`2026-06-01`, confirmed on live output), which parses back into a resumable bookmark. What `WEEK` and `MONTH` put in that column is unverified - a bucket label like `2026-07` would not parse - so those are left on FULL_TABLE and log a line saying so. Confirming the value on one live run is all it takes to widen this; see `_INCREMENTAL_TIME_BUCKET`.
+
+### The report is polled
+
+The reference presents creation as synchronous and returns a `download_url` in the 200. But the same response carries a `status` whose enum includes `STARTED` and `IN_PROGRESS`, so that URL cannot be trusted to be ready. The tap therefore polls `GET /api/v3/advertisers/{advertiserId}/reports/{reportId}` every 5 seconds until the status is `COMPLETED`, then downloads.
+
+- A report already `COMPLETED` on creation is downloaded immediately, with no poll.
+- A report that ends `FAILED`, `CANCELED`, `CANCELING` or `ARCHIVED` **raises**, rather than silently syncing zero rows.
+- A report still running at the ceiling **raises**, pointing at `window_days`. The interval (5s) and the ceiling (1800s, 30 minutes) are the module constants `POLL_INTERVAL_SECONDS` and `MAX_POLL_SECONDS`, **not settings**: the endpoint gives no progress signal to tune an interval against, and raising a ceiling is the wrong answer to hitting it - a report still generating after 30 minutes wants a narrower window, not a longer wait. Generation is genuinely slow: a month-long window at ad x creative x placement x day grain was still `IN_PROGRESS` after 5 minutes on a live account.
+- Progress is logged every 30s while waiting, so a long generation is distinguishable from a hung sync.
+- A response carrying no `status` at all is trusted as-is, so an undocumented shape does not fail the sync on a technicality.
+
+### Schema, primary key and column names
+
+The **schema and primary key are derived from the config**: one column per requested dimension, one per requested metric, plus `advertiser_id` and `report_id`. The key is `advertiser_id` plus one column per requested dimension *family* - asking for both `AD_ID` and `AD` keys on the id, because ad names are **not unique** (4 of 37 distinct names in one test account were shared by two ads each).
+
+The CSV header row is undocumented on both API versions. Headers are **Title Case with spaces** (`"Ad Id"`), so normalisation to snake_case is load-bearing, not a safeguard. The column names in `_DIMENSION_COLUMNS` and `_METRIC_COLUMNS` come from two places:
+
+- **Confirmed against a live v3 report**: `DAY` -> `date`, `AD_ID` -> `ad_id`, `AD` -> `ad`, `CREATIVE_ID` -> `creative_id`, `PLACEMENT` -> `placement`; and the metrics `SPEND` -> `gross_spend`, `CONVERSIONS` -> `total_conversions`, plus `impressions`, `clicks`, `ctr`, `cpm`, `cpc`, `cpa`, `result`, `cost_per_result`.
+- **Inferred from that**: v3 names its *name* columns after the bare entity, where v2 used `<entity>_name` - the live report returns `Ad`, not `Ad Name`. `CAMPAIGN` -> `campaign`, `AD_GROUP` -> `ad_group` and `CREATIVE` -> `creative` follow the same pattern, but only `AD` is directly confirmed.
+- **Still unverified**: the demographic and geo dimensions, and the conversion, carousel and lead-gen metrics. These are the lowercased enum - `GENDER` -> `gender`, and so on.
+
+> The `<entity>_name` -> `<entity>` difference is exactly the kind of thing the spec does not tell you. It was found by running the stream and diffing the emitted keys against the schema, which is the check worth repeating for any dimension in the third group above.
+
+Value formats, all verified on v2 and assumed unchanged:
+
+- **`CTR` is a percentage string** (`"1.05%"`). The tap strips the suffix but does **not** rescale: `ad_stats` reports CTR on the same percentage scale (`0.5573934` for an ad with 246 clicks on 44,134 impressions), so dividing by 100 would make the two streams disagree. Both express CTR as a percentage value - `1.05` means 1.05%.
+- All other money and rate metrics are **bare decimals** (`373.36`), unlike the `/stats` endpoint's currency-prefixed `"GBP 0"`. What currency they are denominated in comes from `advertisers.currency` - nothing else in the API tells you.
+- **A numeric column can hold `"N/A"`.** Seen live, partway through a report. Recognised placeholders (`N/A`, `-`, `null`, empty) become null; anything else non-numeric also becomes null but logs a warning naming the column, so one odd cell cannot discard a report that took ten minutes to generate. Add new placeholders to `_NULL_CSV_VALUES`.
+- `LEAD_INFO` is free text and is passed through as a string.
+
+### Caveats - this stream is built from the spec, not from live traffic
+
+The v2 builder's enums were read out of the API's own validation error and confirmed by creating a report with all of them. **Nothing about v3 has been confirmed that way.** Specifically unverified: whether the dimension and metric enums are complete, whether `type` is required, whether every metric is available without an account feature flag, and - most consequentially - the CSV column names listed as unverified above.
+
+The schema **allows additional properties**, so a wrong column guess passes the value through untyped rather than dropping it. The cost is a declared-but-always-null column alongside an undeclared real one; if the guess was a key column, that is a null in the primary key.
+
+**On the first live run, check the emitted columns against the schema** and correct `_DIMENSION_COLUMNS`/`_METRIC_COLUMNS` in `tap_nextdoor/streams.py` for anything that does not line up. Each is a one-line fix.
 
 ### The reporting window is a date-time here, not a date
 
-`POST /reporting/create` and the `/{entity}/get/{id}/stats` endpoints disagree about time formats, and the reference docs describe both as `LocalDate`:
+The report endpoint and the `/{entity}/get/{id}/stats` endpoints disagree about time formats, and the reference docs describe both as `LocalDate`:
 
 | Endpoint | Accepts | Rejects |
 |---|---|---|
 | `/{entity}/get/{id}/stats` | `2026-07-01` | - |
-| `/reporting/create` | `2026-07-01T00:00:00Z`, `+00:00`, `+01:00[Europe/London]` | `2026-07-01` (*parsed at index 10*), `2026-07-01T00:00:00` (*index 19*) |
+| the report endpoint | `2026-07-01T00:00:00Z`, `+00:00`, `+01:00[Europe/London]` | `2026-07-01` (*parsed at index 10*), `2026-07-01T00:00:00` (*index 19*) |
 
-An offset is mandatory for `reporting/create`. The tap sends the right form to each, so `start_date`/`end_date` behave the same to you regardless of stream.
+An offset is mandatory for the report endpoint. The tap sends the right form to each, so `start_date`/`end_date` behave the same to you regardless of stream. v3 nests them under `date_time_range` and renames both bounds, but the format is unchanged.
 
-`end_date` is documented as inclusive, and existing reports run midnight to midnight (a one-day report spans `00:00` to the next `00:00`), so the tap advances the upper bound by one day when calling `reporting/create`. That inference comes from the sampled reports, not from documentation.
-
-The **schema and primary key are derived from the config**: one column per requested dimension (`AD` -> `ad_id`, `ad_name`), one per requested metric, plus `advertiser_id`, `report_id` and `date`. The key is `advertiser_id` + `date` + the id column of each requested dimension. Money metrics (`SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`) are typed as strings, since the API returns them currency-prefixed; `IMPRESSIONS`/`CLICKS`/`CONVERSIONS` are cast to integers and `CTR` to a float.
-
-The CSV header row is not documented anywhere. It was determined by creating real reports and reading them back. **The format depends on how the report was created**, which is the trap here:
-
-```
-# created by POST /reporting/create - what this stream receives
-Campaign Name,Ad Group Name,Ad Name,Placement,Date,Impressions,Clicks,CTR,Gross Spend,Billable Spend,CPM,CPC,Total Conversions
-
-# pre-existing scheduled reports in the same account - NOT what this stream gets
-campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,start_time,end_time,clicks,impressions,conversions,spend,billable_spend
-```
-
-Sampling 48 existing reports gives the second shape and is misleading. This stream reads the first. What follows from it:
-
-- Headers are **Title Case with spaces**, so normalisation to snake_case is load-bearing, not a safeguard.
-- **IDs are available, though the reference docs omit them.** `dimension_granularity` accepts `CAMPAIGN_ID`, `AD_GROUP_ID` and `AD_ID` alongside the documented name variants, plus `PLATFORM_TYPE`. Requesting an id yields a `Campaign Id`/`Ad Group Id`/`Ad Id` column, so rows join to `campaigns`/`ad_groups`/`ads`/`ad_stats` by ID. The default config asks for `["AD_ID", "AD"]` and keys on the id, because ad names are **not unique** - 4 of 37 distinct names in one test account were shared by two ads each.
-- The time bucket is **`Date`**, not the `start_time`/`end_time` the scheduled reports use.
-- Two metric columns are not their enum name: `SPEND` arrives as **`gross_spend`** and `CONVERSIONS` as **`total_conversions`**.
-- **`CTR` is a percentage string** (`"1.05%"`). The tap strips the suffix but does **not** rescale: `ad_stats` reports CTR on the same percentage scale (`0.5573934` for an ad with 246 clicks on 44,134 impressions), so dividing by 100 would make the two performance streams disagree. Both therefore express CTR as a percentage value - `1.05` means 1.05%.
-- All other money and rate metrics are bare decimals (`373.36`), unlike the `/stats` endpoint's currency-prefixed `"GBP 0"`.
-
-Verified against a live report of 465 rows: every column is declared, nothing passes through undeclared, and the parsed output validates against the generated schema. Only `dimension_granularity` values `CAMPAIGN`/`AD_GROUP`/`AD`/`PLACEMENT` with `time_granularity: [DAY]` have been observed; the schema still allows additional properties, so an unseen combination passes through rather than being dropped.
-
-### The reporting window is a date-time here, not a date
-
-`POST /reporting/create` and the `/{entity}/get/{id}/stats` endpoints disagree about time formats, and the reference docs describe both as `LocalDate`:
-
-| Endpoint | Accepts | Rejects |
-|---|---|---|
-| `/{entity}/get/{id}/stats` | `2026-07-01` | - |
-| `/reporting/create` | `2026-07-01T00:00:00Z`, `+00:00`, `+01:00[Europe/London]` | `2026-07-01` (*parsed at index 10*), `2026-07-01T00:00:00` (*index 19*) |
-
-An offset is mandatory for `reporting/create`. The tap sends the right form to each, so `start_date`/`end_date` behave the same to you regardless of stream.
-
-`end_date` is documented as inclusive, and existing reports run midnight to midnight (a one-day report spans `00:00` to the next `00:00`), so the tap advances the upper bound by one day when calling `reporting/create`. That inference comes from the sampled reports, not from documentation.
-
-The **schema and primary key are derived from the config**: one column per requested dimension (`AD` -> `ad_id`, `ad_name`), one per requested metric, plus `advertiser_id`, `report_id` and `date`. The key is `advertiser_id` + `date` + the id column of each requested dimension. Money metrics (`SPEND`, `BILLABLE_SPEND`, `CPM`, `CPC`) are typed as strings, since the API returns them currency-prefixed; `IMPRESSIONS`/`CLICKS`/`CONVERSIONS` are cast to integers and `CTR` to a float.
-
-The CSV header row is not documented anywhere. It was instead determined empirically, by downloading 48 existing report CSVs from a live account (a read-only operation - the `reports` stream already exposes their download URLs) and collecting the distinct header shapes:
-
-```
-campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,start_time,end_time,clicks,impressions,conversions,spend,billable_spend
-campaign_id,campaign_name,start_time,end_time,spend
-campaign_id,campaign_name,ad_group_id,ad_group_name,ad_id,ad_name,placement,start_time,clicks,impressions,conversions,spend,billable_spend
-campaign_id,campaign_name,start_time,spend
-```
-
-Four things follow, all of which the schema reflects:
-
-- Columns are **already snake_case**, so header normalisation is a no-op safeguard rather than a transformation.
-- The ad group columns are **`ad_group_id`/`ad_group_name`**, even though every JSON endpoint calls the same field `adgroup_id`.
-- The time bucket is **`start_time`** (plus `end_time` on reports spanning a range) - there is no `date` column. `start_time` is therefore part of the primary key.
-- Money is a **bare decimal** (`26.87`), unlike the `/stats` endpoint's currency-prefixed `"GBP 0"`, so report metrics are numeric.
-
-`start_time` is kept as a string because its format varies between reports - `2025-09-30` in some, `2025-09-06 12:00 AM` in others - and neither is RFC 3339. The schema still allows additional properties, so a column combination not seen in those 48 samples passes through rather than being dropped.
+`end_date` is documented as inclusive, and reports run midnight to midnight (a one-day report spans `00:00` to the next `00:00`), so the tap advances the upper bound by one day. That inference comes from sampled v2 reports, not from documentation.
 
 ### Not implemented
 
@@ -216,6 +266,7 @@ Four things follow, all of which the schema reflects:
 | `advertiser_ids` | No | Filter advertisers (and their campaigns/ad groups/ads) by ID. Defaults to every advertiser reported by `/me` |
 | `start_date` | No | Start of the `performance_report` window, as a date (`2025-01-01`). Defaults to today |
 | `end_date` | No | End of that window, inclusive. Defaults to today |
+| `report` | No | Definition of the report built by `performance_report`. See its section above |
 | `page_size` | No | Records per page for the list endpoints. Defaults to 100 |
 
 A full list of supported settings and capabilities is available by running:

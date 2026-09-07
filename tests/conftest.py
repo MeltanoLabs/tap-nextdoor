@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from tap_nextdoor import streams
+
 BASE = "https://ads.nextdoor.com/v2/api"
+V3_BASE = "https://ads.nextdoor.com/api/v3"
 
 SAMPLE_CONFIG = {
     "access_token": "test-access-token",
@@ -38,6 +41,17 @@ def _campaign(i: int) -> dict:
         # Java ZonedDateTime, as returned live.
         "start_time": "2025-01-01T00:01:34+01:00[Europe/London]",
     }
+
+
+@pytest.fixture(autouse=True)
+def _no_poll_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the report poll loop from really sleeping between status checks.
+
+    The interval is a module constant rather than config, so a test that
+    exercises the STARTED -> COMPLETED path would otherwise wait
+    ``POLL_INTERVAL_SECONDS`` per check.
+    """
+    monkeypatch.setattr(streams, "POLL_INTERVAL_SECONDS", 0)
 
 
 @pytest.fixture
@@ -244,25 +258,43 @@ def nam_api(requests_mock):
             "cost_per_result": "GBP 6.25",
         },
     )
-    requests_mock.post(
-        f"{BASE}/reporting/create",
-        json={
-            "id": "rep1",
-            "advertiser_id": "adv1",
-            "name": "tap-nextdoor ad performance",
-            "download_url": "https://example.com/report.csv",
-        },
-    )
+    # The report builder. The reference presents creation as synchronous, so
+    # the default fixture hands back a COMPLETED report with its download_url;
+    # test_report_is_polled_until_completed re-registers these to exercise the
+    # STARTED -> IN_PROGRESS -> COMPLETED path instead. Both advertisers are
+    # mocked, since a full sync visits each one.
+    for advertiser_id in ("adv1", "adv2"):
+        requests_mock.post(
+            f"{V3_BASE}/advertisers/{advertiser_id}/reports",
+            json={
+                "id": "rep1",
+                "advertiser_id": advertiser_id,
+                "name": "performance report",
+                "status": "COMPLETED",
+                "output_format": "CSV",
+                "download_url": "https://example.com/report.csv",
+            },
+        )
+        requests_mock.get(
+            f"{V3_BASE}/advertisers/{advertiser_id}/reports/rep1",
+            json={
+                "id": "rep1",
+                "advertiser_id": advertiser_id,
+                "status": "COMPLETED",
+                "output_format": "CSV",
+                "download_url": "https://example.com/report.csv",
+            },
+        )
     requests_mock.get(
         "https://example.com/report.csv",
-        # Header and value formats copied verbatim from a report created via
-        # POST /reporting/create: Title Case headers, a Date column, names but
-        # no IDs, "Gross Spend"/"Total Conversions", and CTR as a percentage.
+        # Header and value formats copied from a live v3 report. Note "Ad",
+        # not "Ad Name" - v3 names its name-columns after the bare entity,
+        # unlike v2. "N/A" appears in numeric columns where there is no value.
         text=(
-            "Ad Name,Ad Id,Date,Impressions,Clicks,CTR,Gross Spend,"
-            "Billable Spend,CPM,CPC,Total Conversions\n"
-            "Ad,ad1,2026-07-01,72914,762,1.05%,373.36,371.93,5.10,0.49,2\n"
-            "Ad,ad1,2026-07-02,293,1,0.34%,1.29,1.29,4.42,1.29,1\n"
+            "Date,Ad Id,Ad,Creative Id,Creative,Placement,Impressions,Clicks,"
+            "CTR,Gross Spend\n"
+            "2026-07-01,ad1,Ad,cr1,Creative,newsfeed,72914,762,1.05%,373.36\n"
+            "2026-07-02,ad1,Ad,cr1,Creative,newsfeed,293,1,0.34%,N/A\n"
         ),
     )
     requests_mock.get(

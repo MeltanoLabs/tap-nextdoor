@@ -16,7 +16,8 @@ advertisers is discovered from ``/me``):
           custom_audiences        GET /custom_audience/get/{id}
       creatives          GET /advertiser/creative/list
       reports            GET /advertiser/reporting/list
-      performance_report  POST /reporting/create + CSV download
+      performance_report  POST /api/v3/advertisers/{id}/reports,
+                          polled, then CSV download
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ from __future__ import annotations
 import csv
 import io
 import re
+import time
 import typing as t
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import cached_property
 
 import requests
@@ -997,11 +999,118 @@ class CustomAudienceStream(NextdoorStream):
         return row
 
 
-# Enums for POST /reporting/create. The reference docs list only 8 metrics and
-# 4 dimensions; the API accepts 21 and 8. The full sets below were read out of
-# the API's own validation error, which enumerates the accepted values, and
-# then confirmed by creating a report with all of them at once.
+# --------------------------------------------------------------------------
+# The report builder: POST /api/v3/advertisers/{advertiserId}/reports
+#
+# Nextdoor has two report builders. The older one, POST /v2/api/reporting/create
+# on the same base URL as every other stream here, accepts 8 dimensions and 21
+# metrics. This stream targets the v3 endpoint instead, which accepts 29 and
+# roughly 70 - adding creative-level breakdowns, demographics, household and
+# member geo, per-conversion-event metrics and carousel metrics, none of which
+# v2 can express. Auth is the same bearer token.
+#
+# The enums and request shape below are transcribed from the OpenAPI reference:
+# https://developer.nextdoor.com/reference/post_api-v3-advertisers-advertiserid-reports
+# The CSV column headers are undocumented on both versions. The names marked
+# "verified" were confirmed against live v2 reports and are reused here because
+# the two builders are the same product; everything else is the lowercased enum
+# and is a guess. The generated schema allows additional properties, so a wrong
+# guess passes the column through untyped rather than dropping it.
+# --------------------------------------------------------------------------
+
+#: The report builder lives on /api/v3, unlike every other stream in this tap.
+V3_URL_BASE = "https://ads.nextdoor.com/api/v3"
+
+#: Conversion events that appear both as a count metric and as a COST_PER_ one.
+_CONVERSION_EVENTS = (
+    "PURCHASE",
+    "LEAD",
+    "SIGN_UP",
+    "ADD_TO_CART",
+    "INITIATE_CHECKOUT",
+    "SEARCH",
+    "PAGE_VIEW",
+    "VIEW_CONTENT",
+    "ADD_TO_WISHLIST",
+    "SUBSCRIBE",
+)
+_CUSTOM_CONVERSIONS = tuple(range(1, 11))
+
+REPORT_DIMENSIONS = (
+    # Time buckets are dimensions here, not a separate time_granularity field.
+    "DAY",
+    "WEEK",
+    "MONTH",
+    "CAMPAIGN",
+    "CAMPAIGN_ID",
+    "AD_GROUP",
+    "AD_GROUP_ID",
+    "AD",
+    "AD_ID",
+    "CREATIVE",
+    "CREATIVE_ID",
+    "PLACEMENT",
+    "PLATFORM_TYPE",
+    "HOUSEHOLD_SUBDIVISION",
+    "HOUSEHOLD_DMA",
+    "HOUSEHOLD_POSTAL_CODE",
+    "HOUSEHOLD_CITY",
+    "GENDER",
+    "AGE",
+    "HOUSEHOLD_INCOME",
+    "HOMEOWNER",
+    "DEVICE",
+    "INTEREST",
+    "USER_COUNTRY",
+    "USER_STATE",
+    "USER_DMA",
+    "USER_POSTAL_CODE",
+    "USER_CITY",
+    "CONVERSION_EVENT_NAME",
+)
+
 REPORT_METRICS = (
+    "CLICKS",
+    "IMPRESSIONS",
+    "UNIQUE_IMPRESSIONS",
+    "AVG_FREQUENCY",
+    "CTR",
+    "SPEND",
+    "CPM",
+    "CPC",
+    "CPA",
+    "BILLABLE_SPEND",
+    *(f"COST_PER_{event}" for event in _CONVERSION_EVENTS),
+    *(f"COST_PER_CUSTOM_CONVERSION_{n}" for n in _CUSTOM_CONVERSIONS),
+    *_CONVERSION_EVENTS,
+    *(f"CUSTOM_CONVERSION_{n}" for n in _CUSTOM_CONVERSIONS),
+    "CONVERSIONS",
+    "VIEW_THROUGH_CONVERSIONS",
+    "CLICK_THROUGH_CONVERSIONS",
+    "LEAD_INFO",
+    "LEAD_GEN_FORM_SUBMISSIONS",
+    "LEAD_GEN_FORM_COMPLETION_RATE",
+    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS",
+    "VIDEO_FORMAT_PERCENT_25_VIEWS",
+    "VIDEO_FORMAT_PERCENT_50_VIEWS",
+    "VIDEO_FORMAT_PERCENT_75_VIEWS",
+    "VIDEO_FORMAT_PERCENT_100_VIEWS",
+    "VIDEO_FORMAT_SEC_2_VIEWS",
+    "CAROUSEL_ENGAGEMENT",
+    "CAROUSEL_CARD_IMPRESSIONS",
+    "CAROUSEL_CARD_CLICKS",
+    "CAROUSEL_CARD_CTR",
+    "RESULT",
+    "COST_PER_RESULT",
+)
+
+#: Requested when ``report.metrics`` is unset. Deliberately not the whole enum:
+#: the twenty custom-conversion metrics and the carousel and lead-gen families
+#: only mean anything on accounts configured for them, and asking for a metric
+#: the account cannot serve is what the v2 builder raises
+#: REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE for. These eleven are the
+#: delivery metrics confirmed to work on a live account.
+REPORT_DEFAULT_METRICS = (
     "IMPRESSIONS",
     "CLICKS",
     "CTR",
@@ -1013,38 +1122,154 @@ REPORT_METRICS = (
     "CONVERSIONS",
     "RESULT",
     "COST_PER_RESULT",
-    "LEAD_GEN_FORM_SUBMISSIONS",
-    "LEAD_GEN_FORM_COMPLETION_RATE",
-    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS",
-    "VIDEO_FORMAT_SEC_2_VIEWS",
-    "VIDEO_FORMAT_PERCENT_25_VIEWS",
-    "VIDEO_FORMAT_PERCENT_50_VIEWS",
-    "VIDEO_FORMAT_PERCENT_75_VIEWS",
-    "VIDEO_FORMAT_PERCENT_100_VIEWS",
-    # Accepted by the enum but gated behind an account feature flag: requesting
-    # either returns REPORT_BUILDER_INVALID_METRIC_FOR_REPORT_TYPE unless
-    # 'ads2_app_install_report_builder' is enabled. Their columns are unverified.
-    "APP_INSTALLS",
-    "COST_PER_INSTALL",
 )
-REPORT_DIMENSIONS = (
-    "CAMPAIGN",
-    "CAMPAIGN_ID",
-    "AD_GROUP",
-    "AD_GROUP_ID",
-    "AD",
-    "AD_ID",
-    "PLATFORM_TYPE",
-    "PLACEMENT",
+
+REPORT_TYPES = (
+    "DELIVERY_METRICS_REPORT",
+    "LEAD_GEN_FORM_RESULTS_REPORT",
+    "DCO_ENTITY_REPORT",
 )
-REPORT_TIME_GRANULARITIES = ("DAY", "WEEK", "MONTH")
+REPORT_FILTER_ATTRIBUTES = ("AD", "AD_GROUP", "CAMPAIGN", "PLACEMENT")
+REPORT_FILTER_OPERATORS = ("CONTAINS",)
+
+#: How often to log progress while waiting for a report. Generation can take
+#: many minutes, and a silent wait is indistinguishable from a hung sync.
+_POLL_LOG_INTERVAL_SECONDS = 30
+
+#: Seconds between status checks while a report generates. Not configurable:
+#: the endpoint gives no progress signal to tune against, and a shorter
+#: interval only adds requests to a wait dominated by server-side generation.
+POLL_INTERVAL_SECONDS = 5
+
+#: How long to wait for a report to reach COMPLETED before giving up. Not
+#: configurable, because raising it is the wrong response to hitting it: a
+#: report still running at 30 minutes is one asking for too wide a window at
+#: too fine a grain, and ``window_days`` is the fix. A month at
+#: ad x creative x placement x day grain was still IN_PROGRESS after 5
+#: minutes on a live account, so the ceiling is deliberately generous.
+MAX_POLL_SECONDS = 1800
+
+#: Report statuses that will never become COMPLETED.
+_FAILED_STATUSES = frozenset({"CANCELING", "CANCELED", "FAILED", "ARCHIVED"})
+
+#: Dimensions that bucket rows in time. All three land in one ``date`` column.
+_TIME_BUCKETS = frozenset({"DAY", "WEEK", "MONTH"})
+
+#: The only time bucket the stream will replicate incrementally on. A DAY
+#: report's ``date`` is a plain ISO date ("2026-06-01"), confirmed on live
+#: output, so it parses back into a resumable bookmark. What WEEK and MONTH
+#: put in that column is unverified - a bucket label like "2026-07" would not
+#: parse - so those stay FULL_TABLE until one live run says otherwise.
+_INCREMENTAL_TIME_BUCKET = "DAY"
+
+#: Settings the v2 report builder took that v3 has no equivalent for, mapped to
+#: what replaces them. A config carrying one would otherwise be silently
+#: ignored and the report quietly built with defaults.
+_RETIRED_REPORT_SETTINGS = {
+    "dimension_granularity": "dimensions",
+    "time_granularity": "dimensions (DAY, WEEK or MONTH is a dimension here)",
+    "campaign_ids": 'filters, e.g. [{"attribute": "CAMPAIGN", "options": [...]}]',
+    "adgroup_ids": 'filters, e.g. [{"attribute": "AD_GROUP", "options": [...]}]',
+    "ad_ids": 'filters, e.g. [{"attribute": "AD", "options": [...]}]',
+}
+
+#: Dimension/metric pairs the API refuses to serve together, rejecting the
+#: request with REPORT_BUILDER_CONFLICT_PARAMETER. Billable spend attaches
+#: above the creative, so it cannot be split per creative; gross SPEND can.
+#: Confirmed live. The API reports one conflict per request, so this list is
+#: near-certainly incomplete - add pairs here as they surface.
+_CONFLICTING_PAIRS = (("CREATIVE_ID", "BILLABLE_SPEND"),)
+
+_TIME_BUCKET_DESCRIPTION = "The row's time bucket, at the requested granularity"
+
+#: Column and description per dimension. The eight shared with the v2 builder
+#: use header names verified against live v2 reports - note that PLATFORM_TYPE
+#: arrives as `platform`, not as its enum name. The rest are unverified.
+_DIMENSION_COLUMNS: dict[str, tuple[str, str]] = {
+    # The id columns are verified against a live v3 report. The *name* columns
+    # are where v3 diverges from v2: v2 returns "Ad Name" -> ad_name, v3
+    # returns plain "Ad" -> ad. Only AD is directly confirmed; CAMPAIGN,
+    # AD_GROUP and CREATIVE follow the same pattern by inference.
+    "CAMPAIGN": ("campaign", "Campaign name"),
+    "CAMPAIGN_ID": ("campaign_id", "Campaign ID; joins to the campaigns stream"),
+    "AD_GROUP": ("ad_group", "Ad group name"),
+    "AD_GROUP_ID": ("ad_group_id", "Ad group ID; joins to the ad_groups stream"),
+    "AD": ("ad", "Ad name"),
+    "AD_ID": ("ad_id", "Ad ID; joins to the ads and ad_stats streams"),
+    "PLATFORM_TYPE": ("platform", 'Delivery platform, e.g. "On Platform"'),
+    "PLACEMENT": ("placement", "Placement the metrics are attributed to"),
+    # Unverified - v3 has no v2 counterpart to copy a header name from.
+    "DAY": ("date", _TIME_BUCKET_DESCRIPTION),
+    "WEEK": ("date", _TIME_BUCKET_DESCRIPTION),
+    "MONTH": ("date", _TIME_BUCKET_DESCRIPTION),
+    "CREATIVE": ("creative_name", "Creative name"),
+    "CREATIVE_ID": ("creative_id", "Creative ID; joins to the creatives stream"),
+    "HOUSEHOLD_SUBDIVISION": (
+        "household_subdivision",
+        "Subdivision (state/province) of the household",
+    ),
+    "HOUSEHOLD_DMA": ("household_dma", "Designated market area of the household"),
+    "HOUSEHOLD_POSTAL_CODE": ("household_postal_code", "Postal code of the household"),
+    "HOUSEHOLD_CITY": ("household_city", "City of the household"),
+    "GENDER": ("gender", "Gender of the member the impression was served to"),
+    "AGE": ("age", "Age bracket of the member"),
+    "HOUSEHOLD_INCOME": ("household_income", "Household income bracket"),
+    "HOMEOWNER": ("homeowner", "Whether the member is a homeowner"),
+    "DEVICE": ("device", "Device the impression was served on"),
+    "INTEREST": ("interest", "Interest the member was targeted on"),
+    "USER_COUNTRY": ("user_country", "Country of the member"),
+    "USER_STATE": ("user_state", "State/region of the member"),
+    "USER_DMA": ("user_dma", "Designated market area of the member"),
+    "USER_POSTAL_CODE": ("user_postal_code", "Postal code of the member"),
+    "USER_CITY": ("user_city", "City of the member"),
+    "CONVERSION_EVENT_NAME": (
+        "conversion_event_name",
+        "Name of the conversion event the row's conversions belong to",
+    ),
+}
+
+#: Dimensions naming the same thing, most specific first. Only the first
+#: requested member of a family joins the primary key, so asking for both
+#: AD_ID and AD keys on the id rather than the ambiguous name - ad names are
+#: not unique (4 of 37 distinct names in one test account were shared by two
+#: ads each). Every dimension not listed here is its own family.
+_GROUPED_DIMENSIONS = (
+    ("DAY", "WEEK", "MONTH"),
+    ("CAMPAIGN_ID", "CAMPAIGN"),
+    ("AD_GROUP_ID", "AD_GROUP"),
+    ("AD_ID", "AD"),
+    ("CREATIVE_ID", "CREATIVE"),
+)
+_DIMENSION_FAMILIES = (
+    *_GROUPED_DIMENSIONS,
+    *(
+        (dimension,)
+        for dimension in REPORT_DIMENSIONS
+        if not any(dimension in family for family in _GROUPED_DIMENSIONS)
+    ),
+)
+
+#: CSV column per metric, for the metrics whose header is not simply the
+#: lowercased enum. All verified against live v2 reports.
+_METRIC_COLUMNS = {
+    "SPEND": "gross_spend",
+    "CONVERSIONS": "total_conversions",
+    "VIDEO_FORMAT_SEC_2_VIEWS": "video_views_at_2_seconds",
+    "VIDEO_FORMAT_PERCENT_25_VIEWS": "video_views_at_25",
+    "VIDEO_FORMAT_PERCENT_50_VIEWS": "video_views_at_50",
+    "VIDEO_FORMAT_PERCENT_75_VIEWS": "video_views_at_75",
+    "VIDEO_FORMAT_PERCENT_100_VIEWS": "video_views_at_100",
+}
 
 #: Metrics returned as whole numbers.
 _INTEGER_METRICS = frozenset(
     {
         "IMPRESSIONS",
         "CLICKS",
+        "UNIQUE_IMPRESSIONS",
         "CONVERSIONS",
+        "VIEW_THROUGH_CONVERSIONS",
+        "CLICK_THROUGH_CONVERSIONS",
         "LEAD_GEN_FORM_SUBMISSIONS",
         "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS",
         "VIDEO_FORMAT_SEC_2_VIEWS",
@@ -1052,98 +1277,101 @@ _INTEGER_METRICS = frozenset(
         "VIDEO_FORMAT_PERCENT_50_VIEWS",
         "VIDEO_FORMAT_PERCENT_75_VIEWS",
         "VIDEO_FORMAT_PERCENT_100_VIEWS",
-        "APP_INSTALLS",
+        "CAROUSEL_ENGAGEMENT",
+        "CAROUSEL_CARD_IMPRESSIONS",
+        "CAROUSEL_CARD_CLICKS",
+        *_CONVERSION_EVENTS,
+        *(f"CUSTOM_CONVERSION_{n}" for n in _CUSTOM_CONVERSIONS),
     }
 )
 
-#: JSON type per report metric; anything unlisted is a number.
-_METRIC_TYPES: dict[str, t.Any] = dict.fromkeys(_INTEGER_METRICS, th.IntegerType)
-
-#: Column added to the report for each requested dimension granularity, with
-#: the description attached to it in the generated schema. Verified live.
-_DIMENSION_COLUMNS = {
-    "CAMPAIGN": (("campaign_name", "Campaign name"),),
-    "CAMPAIGN_ID": (("campaign_id", "Campaign ID; joins to the campaigns stream"),),
-    "AD_GROUP": (("ad_group_name", "Ad group name"),),
-    "AD_GROUP_ID": (("ad_group_id", "Ad group ID; joins to the ad_groups stream"),),
-    "AD": (("ad_name", "Ad name"),),
-    "AD_ID": (("ad_id", "Ad ID; joins to the ads and ad_stats streams"),),
-    "PLATFORM_TYPE": (("platform", 'Delivery platform, e.g. "On Platform"'),),
-    "PLACEMENT": (("placement", "Placement the metrics are attributed to"),),
-}
-
-#: Dimensions that identify the same entity, most specific first. Only the
-#: first requested member of each family joins the primary key, so asking for
-#: both AD_ID and AD keys on the id rather than the ambiguous name.
-_DIMENSION_FAMILIES = (
-    ("CAMPAIGN_ID", "CAMPAIGN"),
-    ("AD_GROUP_ID", "AD_GROUP"),
-    ("AD_ID", "AD"),
-    ("PLATFORM_TYPE",),
-    ("PLACEMENT",),
+#: Metrics arriving with a "%" suffix. The suffix is stripped but the value is
+#: NOT rescaled: ad_stats returns CTR on the same percentage scale (0.557 for
+#: 0.557%), so dividing by 100 here would make the two streams disagree.
+_PERCENT_METRICS = frozenset(
+    {"CTR", "LEAD_GEN_FORM_COMPLETION_RATE", "CAROUSEL_CARD_CTR"}
 )
 
-#: CSV column each metric arrives in, after header normalisation. Several do
-#: not match the lowercased enum at all.
-_METRIC_COLUMNS = {
-    "IMPRESSIONS": "impressions",
-    "CLICKS": "clicks",
-    "CTR": "ctr",
-    "SPEND": "gross_spend",
-    "BILLABLE_SPEND": "billable_spend",
-    "CPM": "cpm",
-    "CPC": "cpc",
-    "CPA": "cpa",
-    "CONVERSIONS": "total_conversions",
-    "RESULT": "result",
-    "COST_PER_RESULT": "cost_per_result",
-    "LEAD_GEN_FORM_SUBMISSIONS": "lead_gen_form_submissions",
-    "LEAD_GEN_FORM_COMPLETION_RATE": "lead_gen_form_completion_rate",
-    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS": "lead_gen_form_confirmation_cta_clicks",
-    "VIDEO_FORMAT_SEC_2_VIEWS": "video_views_at_2_seconds",
-    "VIDEO_FORMAT_PERCENT_25_VIEWS": "video_views_at_25",
-    "VIDEO_FORMAT_PERCENT_50_VIEWS": "video_views_at_50",
-    "VIDEO_FORMAT_PERCENT_75_VIEWS": "video_views_at_75",
-    "VIDEO_FORMAT_PERCENT_100_VIEWS": "video_views_at_100",
-    "APP_INSTALLS": "app_installs",
-    "COST_PER_INSTALL": "cost_per_install",
+#: Placeholders the report puts in a numeric column when there is no value.
+#: "N/A" is the one seen live - it appeared mid-report and took a ten-minute
+#: sync down with it, so unrecognised non-numerics are nulled and warned about
+#: rather than raised.
+_NULL_CSV_VALUES = frozenset({"", "-", "--", "n/a", "na", "null", "none"})
+
+#: Metrics that are not numeric at all. LEAD_INFO carries the submitted lead
+#: details on a LEAD_GEN_FORM_RESULTS_REPORT.
+_STRING_METRICS = frozenset({"LEAD_INFO"})
+
+_METRIC_TYPES: dict[str, t.Any] = {
+    **dict.fromkeys(_INTEGER_METRICS, th.IntegerType),
+    **dict.fromkeys(_STRING_METRICS, th.StringType),
 }
 
-#: Description per report metric.
-_METRIC_DESCRIPTIONS = {
-    "IMPRESSIONS": "Impressions served",
-    "CLICKS": "Clicks received",
-    "CTR": (
-        "Click-through rate as a percentage value, e.g. 1.05 means 1.05%. "
-        'The CSV reports the string "1.05%"; only the suffix is stripped, so '
-        "the scale matches ad_stats.ctr."
-    ),
-    "SPEND": "Gross spend, as a bare decimal in the account currency",
-    "BILLABLE_SPEND": "Billable spend, as a bare decimal",
-    "CPM": "Cost per thousand impressions, as a bare decimal",
-    "CPC": "Cost per click, as a bare decimal",
-    "CPA": "Cost per acquisition, as a bare decimal",
-    "CONVERSIONS": "Total conversions attributed in the window",
-    "RESULT": "Results against the campaign objective",
-    "COST_PER_RESULT": "Cost per result, as a bare decimal",
-    "LEAD_GEN_FORM_SUBMISSIONS": "Lead gen form submissions",
-    "LEAD_GEN_FORM_COMPLETION_RATE": (
-        "Lead gen form completion rate as a percentage value; the CSV reports "
-        'it as a string like "0.00%"'
-    ),
-    "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS": (
-        "Clicks on the lead gen form confirmation call to action"
-    ),
-    "VIDEO_FORMAT_SEC_2_VIEWS": "Video views reaching 2 seconds",
-    "VIDEO_FORMAT_PERCENT_25_VIEWS": "Video views reaching 25%",
-    "VIDEO_FORMAT_PERCENT_50_VIEWS": "Video views reaching 50%",
-    "VIDEO_FORMAT_PERCENT_75_VIEWS": "Video views reaching 75%",
-    "VIDEO_FORMAT_PERCENT_100_VIEWS": "Video views reaching 100%",
-    "APP_INSTALLS": "App installs. Requires an account feature flag; unverified.",
-    "COST_PER_INSTALL": (
-        "Cost per app install. Requires an account feature flag; unverified."
-    ),
-}
+
+def _metric_descriptions() -> dict[str, str]:
+    """Build the per-metric descriptions, generating the repetitive families."""
+    descriptions = {
+        "IMPRESSIONS": "Impressions served",
+        "UNIQUE_IMPRESSIONS": "Distinct members an impression was served to",
+        "AVG_FREQUENCY": "Average impressions per member reached",
+        "CLICKS": "Clicks received",
+        "CTR": (
+            "Click-through rate as a percentage value, e.g. 1.05 means 1.05%. "
+            'The CSV reports the string "1.05%"; only the suffix is stripped, '
+            "so the scale matches ad_stats.ctr."
+        ),
+        "SPEND": "Gross spend, as a bare decimal in the account currency",
+        "BILLABLE_SPEND": "Billable spend, as a bare decimal",
+        "CPM": "Cost per thousand impressions, as a bare decimal",
+        "CPC": "Cost per click, as a bare decimal",
+        "CPA": "Cost per acquisition, as a bare decimal",
+        "CONVERSIONS": "Total conversions attributed in the window",
+        "VIEW_THROUGH_CONVERSIONS": (
+            "Conversions attributed to an impression rather than a click"
+        ),
+        "CLICK_THROUGH_CONVERSIONS": "Conversions attributed to a click",
+        "RESULT": "Results against the campaign objective",
+        "COST_PER_RESULT": "Cost per result, as a bare decimal",
+        "LEAD_INFO": (
+            "Submitted lead details, on a LEAD_GEN_FORM_RESULTS_REPORT. Free "
+            "text, so it is passed through as a string."
+        ),
+        "LEAD_GEN_FORM_SUBMISSIONS": "Lead gen form submissions",
+        "LEAD_GEN_FORM_COMPLETION_RATE": (
+            "Lead gen form completion rate as a percentage value; the CSV "
+            'reports it as a string like "0.00%"'
+        ),
+        "LEAD_GEN_FORM_CONFIRMATION_CTA_CLICKS": (
+            "Clicks on the lead gen form confirmation call to action"
+        ),
+        "VIDEO_FORMAT_SEC_2_VIEWS": "Video views reaching 2 seconds",
+        "VIDEO_FORMAT_PERCENT_25_VIEWS": "Video views reaching 25%",
+        "VIDEO_FORMAT_PERCENT_50_VIEWS": "Video views reaching 50%",
+        "VIDEO_FORMAT_PERCENT_75_VIEWS": "Video views reaching 75%",
+        "VIDEO_FORMAT_PERCENT_100_VIEWS": "Video views reaching 100%",
+        "CAROUSEL_ENGAGEMENT": "Engagements with a carousel ad",
+        "CAROUSEL_CARD_IMPRESSIONS": "Impressions of individual carousel cards",
+        "CAROUSEL_CARD_CLICKS": "Clicks on individual carousel cards",
+        "CAROUSEL_CARD_CTR": (
+            "Carousel card click-through rate as a percentage value, e.g. "
+            "1.05 means 1.05%"
+        ),
+    }
+    for event in _CONVERSION_EVENTS:
+        label = event.lower().replace("_", " ")
+        descriptions[event] = f"{label.capitalize()} conversions attributed"
+        descriptions[f"COST_PER_{event}"] = (
+            f"Cost per {label} conversion, as a bare decimal"
+        )
+    for n in _CUSTOM_CONVERSIONS:
+        descriptions[f"CUSTOM_CONVERSION_{n}"] = f"Custom conversion {n} events"
+        descriptions[f"COST_PER_CUSTOM_CONVERSION_{n}"] = (
+            f"Cost per custom conversion {n}, as a bare decimal"
+        )
+    return descriptions
+
+
+_METRIC_DESCRIPTIONS = _metric_descriptions()
 
 
 def _slug(value: str) -> str:
@@ -1158,41 +1386,79 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
-#: Metrics arriving with a "%" suffix. The suffix is stripped but the value is
-#: NOT rescaled: ad_stats returns CTR on the same percentage scale (0.557 for
-#: 0.557%), so dividing by 100 here would make the two streams disagree.
-_PERCENT_METRICS = frozenset({"CTR", "LEAD_GEN_FORM_COMPLETION_RATE"})
+def _as_offset_datetime(day: date) -> str:
+    """Render a plain date as the offset-bearing date-time the API demands.
+
+    The report endpoint rejects a bare date - see
+    :meth:`NextdoorStream.window_datetime`. Midnight UTC is used, matching how
+    a date-only ``start_date``/``end_date`` setting is read.
+    """
+    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).isoformat()
 
 
 class PerformanceReportStream(NextdoorStream):
     """A custom performance report, defined entirely by the ``report`` config.
 
     Both the report definition and the stream's own name come from config, so
-    one workspace can extract an ad-level report and another a campaign-level
+    one workspace can extract an ad-level report and another a creative-level
     one without any code change.
 
-    Unlike every other stream here this one **writes**: ``POST /reporting/create``
-    generates an ad hoc report, emails it to ``recipient_emails``, and returns a
-    presigned ``download_url`` for the CSV, which this stream then downloads and
-    emits row by row. Two consequences worth knowing:
+    Unlike every other stream here this one **writes**: it creates an ad hoc
+    report on the advertiser's account, emails it to ``recipient_emails``, and
+    returns a presigned ``download_url`` for the CSV, which this stream then
+    downloads and emits row by row. Two consequences worth knowing:
 
-    * Each sync creates a new report object in the advertiser's account. They
-      accumulate - the ``reports`` stream lists everything created so far.
+    * Each sync creates a report object in the advertiser's account. They
+      accumulate. (They are v3 objects, so they do *not* show up in the
+      ``reports`` stream, which lists v2 report definitions.)
     * Each sync emails the recipients. Leave ``recipient_emails`` empty to skip
-      the email while still generating the report, if the API allows it (the
-      OpenAPI schema does not mark the field required).
+      the email while still generating the report.
+
+    The report is built on Nextdoor's **v3** endpoint,
+    ``POST /api/v3/advertisers/{advertiserId}/reports``, rather than the older
+    ``POST /v2/api/reporting/create`` that the rest of this tap's base URL
+    points at. That buys 29 dimensions and ~70 metrics instead of 8 and 21 -
+    creative, demographics, household and member geo, per-conversion-event
+    metrics. Four things follow from the version difference:
+
+    * The advertiser is a **path** parameter, not a body field.
+    * The time bucket is a **dimension** (``DAY``/``WEEK``/``MONTH``), not a
+      separate setting, and all three land in the same ``date`` column.
+    * Scoping is by ``filters`` - ``{attribute, operator: CONTAINS, options}``
+      matching on *names*. There is no documented way to filter by id, so the
+      v2 builder's ``campaign_ids``/``adgroup_ids``/``ad_ids`` have no
+      equivalent; :data:`_RETIRED_REPORT_SETTINGS` rejects them explicitly
+      rather than ignoring them.
+    * Some dimension/metric pairs are refused together - see
+      :data:`_CONFLICTING_PAIRS`. They are checked before the request so the
+      failure lands at startup, not mid-sync.
+    * The response carries a ``status``. The reference presents the call as
+      synchronous, but the enum includes ``STARTED`` and ``IN_PROGRESS``, so
+      the report is polled until it reports ``COMPLETED`` before the CSV is
+      downloaded. A report that ends ``FAILED``/``CANCELED``/``ARCHIVED``, or
+      is still running at :data:`MAX_POLL_SECONDS`, raises rather than silently
+      syncing zero rows.
 
     The CSV's column headers are normalised to snake_case (``"Ad ID"`` ->
     ``ad_id``). Because the header row is not documented, the schema allows
     additional properties so unexpected columns are passed through rather than
     dropped.
+
+    **Replication.** INCREMENTAL on ``date`` when ``dimensions`` includes
+    ``DAY``, otherwise FULL_TABLE - a report without a time bucket is a single
+    aggregate row per entity for the whole window, with nothing to bookmark.
+    This is the cheapest lever on the stream: generation time grows with the
+    window, so resuming from the bookmark shortens the part that is actually
+    slow. ``lookback_days`` of already-synced history is re-fetched, because
+    report metrics are restated as conversions are attributed late.
     """
 
     #: Default stream name. Overridable via ``report.stream_name``, since the
-    #: rows are only about ads when ``dimension_granularity`` says so - a
-    #: campaign-level report may deserve a campaign-level name.
+    #: rows are only about ads when ``dimensions`` says so - a creative-level
+    #: report may deserve a creative-level name.
     name = "performance_report"
-    path = "/reporting/create"
+    url_base = V3_URL_BASE
+    path = "/advertisers/{advertiser_id}/reports"
     http_method = "POST"
     records_jsonpath = "$"  # unused; parse_response is overridden
     parent_stream_type = AdvertiserStream
@@ -1215,9 +1481,22 @@ class PerformanceReportStream(NextdoorStream):
         )
         self._primary_keys = (
             "advertiser_id",
-            "date",
-            *self._key_columns(self._report["dimension_granularity"]),
+            *self._key_columns(self._report["dimensions"]),
         )
+        # Incremental only when the rows carry a day. The replication key has
+        # to be decided here rather than declared on the class, because
+        # whether there is a `date` column at all comes from config - see
+        # _INCREMENTAL_TIME_BUCKET.
+        if _INCREMENTAL_TIME_BUCKET in self._report["dimensions"]:
+            self.replication_key = "date"
+        elif set(self._report["dimensions"]) & _TIME_BUCKETS:
+            self.logger.info(
+                "%s: dimensions carry a WEEK/MONTH bucket rather than DAY, so "
+                "the stream stays FULL_TABLE. The bucket value's format is "
+                "unverified on this endpoint, and a bookmark cannot be "
+                "resumed from a value that will not parse as a date.",
+                self.name,
+            )
 
     @property
     def report_config(self) -> dict[str, t.Any]:
@@ -1226,17 +1505,38 @@ class PerformanceReportStream(NextdoorStream):
 
     @staticmethod
     def _validated_report(configured: dict[str, t.Any]) -> dict[str, t.Any]:
-        """Validate the configured report definition and apply defaults."""
-        metrics = list(configured.get("metrics") or REPORT_METRICS)
-        dimensions = list(configured.get("dimension_granularity") or ["AD_ID", "AD"])
-        time_granularity = list(configured.get("time_granularity") or ["DAY"])
+        """Validate the configured report definition and apply defaults.
 
+        Args:
+            configured: The raw ``report`` config block.
+
+        Returns:
+            The block with defaults applied.
+
+        Raises:
+            ValueError: If a setting is one the v3 builder retired, or an enum
+                value is not one it accepts.
+        """
+        if retired := sorted(set(configured) & set(_RETIRED_REPORT_SETTINGS)):
+            replacements = ", ".join(
+                f"report.{setting} -> use report.{_RETIRED_REPORT_SETTINGS[setting]}"
+                for setting in retired
+            )
+            msg = (
+                f"report setting(s) {retired} are not supported by the v3 "
+                f"report endpoint this stream uses. {replacements}"
+            )
+            raise ValueError(msg)
+
+        metrics = list(configured.get("metrics") or REPORT_DEFAULT_METRICS)
+        dimensions = list(configured.get("dimensions") or ["DAY", "AD_ID", "AD"])
+        report_type = configured.get("type") or "DELIVERY_METRICS_REPORT"
         name = configured.get("name") or "performance report"
 
         for values, allowed, label in (
             (metrics, REPORT_METRICS, "metrics"),
-            (dimensions, REPORT_DIMENSIONS, "dimension_granularity"),
-            (time_granularity, REPORT_TIME_GRANULARITIES, "time_granularity"),
+            (dimensions, REPORT_DIMENSIONS, "dimensions"),
+            ([report_type], REPORT_TYPES, "type"),
         ):
             if invalid := [v for v in values if v not in allowed]:
                 msg = (
@@ -1245,34 +1545,102 @@ class PerformanceReportStream(NextdoorStream):
                 )
                 raise ValueError(msg)
 
+        for dimension, metric in _CONFLICTING_PAIRS:
+            if dimension in dimensions and metric in metrics:
+                # The SDK fills the config_jsonschema default in, so an
+                # absent `metrics` key still arrives populated. Compare
+                # against the default list rather than testing for presence,
+                # or the message blames a setting the user never wrote.
+                source = (
+                    "the default metric list, REPORT_DEFAULT_METRICS"
+                    if metrics == list(REPORT_DEFAULT_METRICS)
+                    else "report.metrics"
+                )
+                msg = (
+                    f"report.dimensions {dimension} and {metric} (from "
+                    f"{source}) cannot be used together - the API rejects the "
+                    "combination with REPORT_BUILDER_CONFLICT_PARAMETER. Drop "
+                    "the dimension, or set report.metrics explicitly without "
+                    f"{metric}."
+                )
+                raise ValueError(msg)
+
+        window_days = configured.get("window_days")
+        window_days = None if window_days in (None, 0) else int(window_days)
+        if window_days is not None and window_days < 1:
+            msg = f"report.window_days must be at least 1, got {window_days}."
+            raise ValueError(msg)
+        # Each slice is a separate report, so without a time dimension every
+        # slice emits the same key with different values - the rows would
+        # collide in the target rather than accumulate.
+        if window_days is not None and not (set(dimensions) & _TIME_BUCKETS):
+            msg = (
+                "report.window_days splits the run into one report per slice, "
+                "so report.dimensions must include a time bucket (DAY, WEEK "
+                "or MONTH). Without one, every slice emits the same primary "
+                "key and the rows collide."
+            )
+            raise ValueError(msg)
+
+        filters = [
+            PerformanceReportStream._validated_filter(entry)
+            for entry in configured.get("filters") or []
+        ]
+
         return {
             "metrics": metrics,
-            "dimension_granularity": dimensions,
-            "time_granularity": time_granularity,
+            "dimensions": dimensions,
+            "type": report_type,
             "name": name,
             # The stream, and so the target table, is named after the report
             # being configured. An explicit stream_name wins; otherwise the
             # report's own name is slugified.
             "stream_name": configured.get("stream_name") or _slug(name),
             "recipient_emails": list(configured.get("recipient_emails") or []),
-            "campaign_ids": list(configured.get("campaign_ids") or []),
-            "adgroup_ids": list(configured.get("adgroup_ids") or []),
-            "ad_ids": list(configured.get("ad_ids") or []),
+            "filters": filters,
+            "window_days": window_days,
+        }
+
+    @staticmethod
+    def _validated_filter(entry: dict[str, t.Any]) -> dict[str, t.Any]:
+        """Validate one ``filters`` entry.
+
+        Args:
+            entry: A single configured filter.
+
+        Returns:
+            The filter, normalised to the three keys the API expects.
+
+        Raises:
+            ValueError: If the attribute or operator is not accepted.
+        """
+        attribute = entry.get("attribute")
+        operator = entry.get("operator") or "CONTAINS"
+        for value, allowed, label in (
+            (attribute, REPORT_FILTER_ATTRIBUTES, "attribute"),
+            (operator, REPORT_FILTER_OPERATORS, "operator"),
+        ):
+            if value not in allowed:
+                msg = (
+                    f"Invalid report.filters[].{label} value {value!r}. "
+                    f"Supported values: {list(allowed)}"
+                )
+                raise ValueError(msg)
+        return {
+            "attribute": attribute,
+            "operator": operator,
+            "options": list(entry.get("options") or []),
         }
 
     @staticmethod
     def _key_columns(dimensions: list[str]) -> list[str]:
-        """Return one key column per requested dimension family.
-
-        Asking for both ``AD_ID`` and ``AD`` yields two columns but only one
-        identity, so the id is preferred and the name left out of the key.
-        """
+        """Return one key column per requested dimension family."""
         requested = set(dimensions)
         columns = []
         for family in _DIMENSION_FAMILIES:
             for member in family:
                 if member in requested:
-                    columns.append(_DIMENSION_COLUMNS[member][0][0])
+                    columns.append(_DIMENSION_COLUMNS[member][0])
                     break
         return columns
 
@@ -1289,21 +1657,24 @@ class PerformanceReportStream(NextdoorStream):
             th.Property(
                 "report_id",
                 th.StringType,
-                description="ID of the generated report; joins to the reports stream",
-            ),
-            th.Property(
-                "date",
-                th.DateType,
-                description=(
-                    "The row's time bucket, at the configured time_granularity"
-                ),
+                description="ID of the generated report",
             ),
         ]
 
-        for dimension in report["dimension_granularity"]:
-            properties.extend(
-                th.Property(column, th.StringType, description=description)
-                for column, description in _DIMENSION_COLUMNS[dimension]
+        # DAY, WEEK and MONTH all land in the same `date` column, so a config
+        # naming more than one must not declare the property twice.
+        seen: set[str] = set()
+        for dimension in report["dimensions"]:
+            column, description = _DIMENSION_COLUMNS[dimension]
+            if column in seen:
+                continue
+            seen.add(column)
+            properties.append(
+                th.Property(
+                    column,
+                    th.DateType if column == "date" else th.StringType,
+                    description=description,
+                )
             )
 
         for metric in report["metrics"]:
@@ -1323,47 +1694,257 @@ class PerformanceReportStream(NextdoorStream):
         context: Context | None,
         next_page_token: str | None,  # noqa: ARG002
     ) -> dict | None:
-        """Build the report definition sent to ``POST /reporting/create``."""
+        """Build the report definition sent to the reports endpoint."""
         report = self.report_config
-        payload = {
-            "advertiser_id": (context or {})["advertiser_id"],
-            "name": report["name"],
-            "recipient_emails": report["recipient_emails"],
-            "dimension_granularity": report["dimension_granularity"],
-            "time_granularity": report["time_granularity"],
+        window_start = (context or {}).get("window_start")
+        payload: dict[str, t.Any] = {
+            "name": (
+                self._report_name(window_start, (context or {})["window_end"])
+                if window_start
+                else report["name"]
+            ),
+            "type": report["type"],
+            # Only CSV is parsed here; XLSX is accepted by the API but would
+            # need a binary reader.
+            "output_format": "CSV",
+            "date_time_range": self._date_time_range(context),
+            "dimensions": report["dimensions"],
             "metrics": report["metrics"],
-            # This endpoint needs an offset-bearing date-time, unlike the
-            # /stats endpoints which take a plain LocalDate. `end_date` is
-            # documented as inclusive, and existing reports run midnight to
-            # midnight (a one-day report spans 00:00 to the next 00:00), so
-            # the upper bound is advanced by a day to match.
-            "start_time": self.window_datetime("start_date"),
-            "end_time": self.window_datetime("end_date", plus_days=1),
+            "recipient_emails": report["recipient_emails"],
         }
-        for key in ("campaign_ids", "adgroup_ids", "ad_ids"):
-            if report[key]:
-                payload[key] = report[key]
+        if report["filters"]:
+            payload["filters"] = report["filters"]
         return payload
+
+    def _date_time_range(self, context: Context | None) -> dict[str, str]:
+        """Return the window for this request, as the endpoint wants it.
+
+        The endpoint needs an offset-bearing date-time, unlike the /stats
+        endpoints which take a plain LocalDate. Both bounds are exclusive at
+        the top: the end is advanced a day, because ``end_date`` is documented
+        as inclusive and reports run midnight to midnight.
+
+        Args:
+            context: The stream context. :meth:`get_records` puts the current
+                slice on it; the config window is used if it has not.
+
+        Returns:
+            The ``date_time_range`` object for the request body.
+        """
+        window_start = (context or {}).get("window_start")
+        if window_start is None:
+            return {
+                "start_date_time": self.window_datetime("start_date"),
+                "end_date_time": self.window_datetime("end_date", plus_days=1),
+            }
+        return {
+            "start_date_time": _as_offset_datetime(window_start),
+            "end_date_time": _as_offset_datetime(
+                (context or {})["window_end"] + timedelta(days=1),
+            ),
+        }
 
     def get_new_paginator(self) -> SinglePagePaginator:
         """Return a single-page paginator - one report per request."""
         return SinglePagePaginator()
 
-    def parse_response(self, response: requests.Response) -> t.Iterable[dict]:
-        """Download the generated CSV and yield one record per row.
+    def get_records(self, context: Context | None) -> t.Iterable[dict]:
+        """Request one report per window slice, oldest first.
+
+        Generation time grows with the window and the number of dimensions, so
+        a year at creative grain asked for in one report may never finish.
+        ``report.window_days`` splits it into several smaller reports, which
+        also means a failure costs one slice rather than the whole run.
 
         Args:
-            response: The ``reporting/create`` response, carrying ``download_url``.
+            context: The stream context, carrying the advertiser id.
+
+        Yields:
+            One record per CSV row, across every slice.
+        """
+        windows = self._windows(context)
+        if len(windows) > 1:
+            self.logger.info(
+                "%s: %d window slices of up to %d days; that is %d reports "
+                "created for advertiser %s this sync.",
+                self.name,
+                len(windows),
+                self.report_config["window_days"],
+                len(windows),
+                (context or {}).get("advertiser_id"),
+            )
+        for start, end in windows:
+            yield from super().get_records(
+                {**(context or {}), "window_start": start, "window_end": end},
+            )
+
+    def _report_name(self, start: date, end: date) -> str:
+        """Return the report's name in NAM, with its window stamped in.
+
+        Report objects accumulate in the account, one per slice per sync, and
+        the API puts neither a created-at timestamp nor a date range on them -
+        a listed report carries only ``id``, ``name``, ``status``,
+        ``dimensions``, ``metrics``, ``filters``, ``output_format`` and
+        ``download_url``. The name is therefore the only thing that says what
+        period a report covers, so the window goes in it.
+
+        The tap's own stream name is unaffected: it comes from the configured
+        ``name`` (or ``stream_name``), not from this.
+        """
+        return f"{self.report_config['name']} {start.isoformat()}..{end.isoformat()}"
+
+    def _windows(self, context: Context | None) -> list[tuple[date, date]]:
+        """Return the (start, end) date pairs to build a report for, inclusive.
+
+        A single pair spanning the whole window when ``window_days`` is unset.
+
+        On an incremental run the start is pulled forward to the bookmark,
+        less ``lookback_days``. That is the main lever on this stream's cost:
+        generation time grows with the window, so a daily run asks for a few
+        days rather than regenerating the whole history.
+
+        Args:
+            context: The stream context, used to read the bookmark.
+
+        Returns:
+            The (start, end) pairs, oldest first.
+        """
+        start = self.window_date("start_date")
+        end = self.window_date("end_date")
+
+        # get_starting_timestamp() would raise: it insists the replication key
+        # be a date-time, and `date` is a plain date. The raw bookmark value is
+        # what we want anyway. Report metrics are restated as conversions are
+        # attributed late, so recent buckets are deliberately re-fetched.
+        if self.replication_key and (
+            bookmark := self.get_starting_replication_key_value(context)
+        ):
+            resumed = as_local_date(str(bookmark)) - timedelta(
+                days=self.config.get("lookback_days", DEFAULT_LOOKBACK_DAYS)
+            )
+            start = max(start, resumed)
+
+        if start > end:
+            # Either a misconfigured window, or an incremental run whose
+            # bookmark has already passed end_date - both mean no report.
+            self.logger.warning(
+                "%s: resolved start (%s) is after end_date (%s); nothing to sync.",
+                self.name,
+                start.isoformat(),
+                end.isoformat(),
+            )
+            return []
+
+        size = self.report_config["window_days"]
+        if not size:
+            return [(start, end)]
+
+        windows = []
+        cursor = start
+        while cursor <= end:
+            slice_end = min(cursor + timedelta(days=size - 1), end)
+            windows.append((cursor, slice_end))
+            cursor = slice_end + timedelta(days=1)
+        return windows
+
+    def _fetch_report(self, advertiser_id: str, report_id: str) -> dict:
+        """Re-read a report's record, to check whether it has finished."""
+        response = self._request(
+            self.build_prepared_request(
+                method="GET",
+                url=f"{self.url_base}/advertisers/{advertiser_id}/reports/{report_id}",
+                headers=self.http_headers,
+            ),
+            None,
+        )
+        return response.json()
+
+    def _await_completion(self, created: dict) -> dict:
+        """Poll the created report until it reports ``COMPLETED``.
+
+        The interval and the ceiling are the module constants
+        :data:`POLL_INTERVAL_SECONDS` and :data:`MAX_POLL_SECONDS`, not config
+        - see those for why.
+
+        Args:
+            created: The body returned by the create call.
+
+        Returns:
+            The report record to take ``download_url`` from.
+
+        Raises:
+            RuntimeError: If the report reaches a terminal failure status, or
+                is still running after :data:`MAX_POLL_SECONDS`.
+        """
+        report = created
+        status = report.get("status")
+        advertiser_id = report.get("advertiser_id")
+        report_id = report.get("id")
+
+        # Undocumented shape, or nothing to poll with: trust what was handed
+        # back rather than failing the sync on a technicality.
+        if status is None or not (advertiser_id and report_id):
+            return report
+
+        budget = MAX_POLL_SECONDS
+        started = time.monotonic()
+        last_logged = 0.0
+
+        while status != "COMPLETED":
+            if status in _FAILED_STATUSES:
+                msg = f"Report {report_id} finished with status {status}."
+                raise RuntimeError(msg)
+            elapsed = time.monotonic() - started
+            if elapsed >= budget:
+                msg = (
+                    f"Report {report_id} was still {status} after {budget}s. "
+                    "Narrow the window with report.window_days, or ask for "
+                    "fewer dimensions - generation time grows with both."
+                )
+                raise RuntimeError(msg)
+            if elapsed - last_logged >= _POLL_LOG_INTERVAL_SECONDS:
+                last_logged = elapsed
+                self.logger.info(
+                    "Report %s is %s after %.0fs; waiting up to %ss.",
+                    report_id,
+                    status,
+                    elapsed,
+                    budget,
+                )
+            time.sleep(POLL_INTERVAL_SECONDS)
+            report = self._fetch_report(advertiser_id, report_id)
+            status = report.get("status")
+
+        self.logger.info(
+            "Report %s completed after %.0fs.", report_id, time.monotonic() - started
+        )
+        return report
+
+    def parse_response(self, response: requests.Response) -> t.Iterable[dict]:
+        """Wait for the report, download its CSV and yield one record per row.
+
+        Args:
+            response: The create-report response.
 
         Yields:
             One record per CSV data row.
         """
-        created = response.json()
-        download_url = created.get("download_url")
+        yield from self._emit_csv(self._await_completion(response.json()))
+
+    def _emit_csv(self, report: dict) -> t.Iterable[dict]:
+        """Download a completed report's CSV and yield one record per row.
+
+        Args:
+            report: A report record carrying ``download_url``.
+
+        Yields:
+            One record per CSV data row.
+        """
+        download_url = report.get("download_url")
         if not download_url:
             self.logger.warning(
-                "No download_url returned for report %s; nothing to emit.",
-                created.get("id"),
+                "Report %s completed with no download_url; nothing to emit.",
+                report.get("id"),
             )
             return
 
@@ -1373,14 +1954,39 @@ class PerformanceReportStream(NextdoorStream):
         csv_response.raise_for_status()
 
         reader = csv.DictReader(io.StringIO(csv_response.text))
+        emitted = 0
         for row in reader:
             record = {
                 self._normalise_header(key): value
                 for key, value in row.items()
                 if key is not None
             }
-            record["report_id"] = created.get("id")
+            record["report_id"] = report.get("id")
+            emitted += 1
             yield record
+
+        if emitted:
+            self.logger.info("Report %s: %d rows.", report.get("id"), emitted)
+        else:
+            # A report with no rows is not an error - the advertiser may simply
+            # have had no delivery in the window - but it is indistinguishable
+            # from a broken sync at the target, which writes no file at all.
+            # The header row survives an empty report, and it is the only place
+            # the CSV's real column names can be read, so log it: that is how
+            # the inferred names in _DIMENSION_COLUMNS get confirmed.
+            self.logger.warning(
+                "Report %s downloaded with 0 data rows. Its CSV header was %s, "
+                "normalising to %s. No rows means no output file from the "
+                "target, which is expected when the advertiser had no "
+                "delivery in the window.",
+                report.get("id"),
+                reader.fieldnames,
+                [
+                    self._normalise_header(f)
+                    for f in reader.fieldnames or []
+                    if f is not None
+                ],
+            )
 
     @staticmethod
     def _normalise_header(header: str) -> str:
@@ -1393,15 +1999,50 @@ class PerformanceReportStream(NextdoorStream):
         row["advertiser_id"] = (context or {})["advertiser_id"]
 
         for metric in self.report_config["metrics"]:
-            column = _METRIC_COLUMNS.get(metric, metric.lower())
-            value = row.get(column)
-            if value in (None, ""):
+            if metric in _STRING_METRICS:
                 continue
-            if isinstance(value, str) and metric in _PERCENT_METRICS:
-                # "1.05%" -> 1.05, the same scale ad_stats reports CTR on
-                row[column] = float(value.rstrip("%").strip())
-            elif metric in _INTEGER_METRICS:
-                row[column] = int(float(value))
-            else:
-                row[column] = float(value)
+            column = _METRIC_COLUMNS.get(metric, metric.lower())
+            row[column] = self._as_number(metric, column, row.get(column))
         return row
+
+    def _as_number(
+        self,
+        metric: str,
+        column: str,
+        value: str | float | None,
+    ) -> float | None:
+        """Coerce one CSV cell to a number, or to None if it is not one.
+
+        The CSV is untyped text and undocumented, so a cell can hold a
+        placeholder like "N/A" where a number is expected. Nulling it keeps the
+        rest of the report - and the rest of the sync - intact; raising would
+        discard everything already fetched.
+
+        Args:
+            metric: The metric enum this column holds.
+            column: The CSV column name, for the warning.
+            value: The raw cell.
+
+        Returns:
+            An int, a float, or None.
+        """
+        if value is None:
+            return None
+        text = value.strip() if isinstance(value, str) else value
+        if isinstance(text, str):
+            if text.lower() in _NULL_CSV_VALUES:
+                return None
+            if metric in _PERCENT_METRICS:
+                # "1.05%" -> 1.05, the same scale ad_stats reports CTR on
+                text = text.removesuffix("%").strip()
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Report column %s held %r, which is not a number; emitting "
+                "null. Add it to _NULL_CSV_VALUES if it is a placeholder.",
+                column,
+                value,
+            )
+            return None
+        return int(number) if metric in _INTEGER_METRICS else number

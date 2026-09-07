@@ -83,29 +83,34 @@ class TapNextdoor(Tap):
                     description=(
                         "Metrics to include. Supported: "
                         + ", ".join(streams.REPORT_METRICS)
-                        + ". Defaults to all of them."
+                        + ". Defaults to the eleven delivery metrics "
+                        "confirmed against a live account: "
+                        + ", ".join(streams.REPORT_DEFAULT_METRICS)
+                        + "."
                     ),
-                    default=list(streams.REPORT_METRICS),
+                    default=list(streams.REPORT_DEFAULT_METRICS),
                 ),
                 th.Property(
-                    "dimension_granularity",
+                    "dimensions",
                     th.ArrayType(th.StringType),
                     description=(
-                        "Dimensions to break the report down by. Supported: "
+                        "Dimensions to break the report down by, including "
+                        "the time bucket - DAY, WEEK and MONTH are dimensions "
+                        "here, not a separate setting. Supported: "
                         + ", ".join(streams.REPORT_DIMENSIONS)
-                        + ". Defaults to AD."
+                        + ". Defaults to DAY, AD_ID, AD."
                     ),
-                    default=["AD"],
+                    default=["DAY", "AD_ID", "AD"],
                 ),
                 th.Property(
-                    "time_granularity",
-                    th.ArrayType(th.StringType),
+                    "type",
+                    th.StringType,
                     description=(
-                        "Time bucket for each row. Supported: "
-                        + ", ".join(streams.REPORT_TIME_GRANULARITIES)
-                        + ". Defaults to DAY."
+                        "Report category. Supported: "
+                        + ", ".join(streams.REPORT_TYPES)
+                        + ". Defaults to DELIVERY_METRICS_REPORT."
                     ),
-                    default=["DAY"],
+                    default="DELIVERY_METRICS_REPORT",
                 ),
                 th.Property(
                     "name",
@@ -118,7 +123,7 @@ class TapNextdoor(Tap):
                     description=(
                         "Override the stream's name. Defaults to "
                         "performance_report; set it to match the chosen "
-                        "granularity, e.g. campaign_performance_report."
+                        "granularity, e.g. creative_performance_report."
                     ),
                 ),
                 th.Property(
@@ -132,25 +137,50 @@ class TapNextdoor(Tap):
                     default=[],
                 ),
                 th.Property(
-                    "campaign_ids",
-                    th.ArrayType(th.StringType),
-                    description="Restrict the report to these campaigns.",
+                    "filters",
+                    th.ArrayType(
+                        th.ObjectType(
+                            th.Property(
+                                "attribute",
+                                th.StringType,
+                                required=True,
+                            ),
+                            th.Property(
+                                "operator",
+                                th.StringType,
+                                default="CONTAINS",
+                            ),
+                            th.Property("options", th.ArrayType(th.StringType)),
+                        )
+                    ),
+                    description=(
+                        "Restrict the report by entity name, e.g. "
+                        '{"attribute": "CAMPAIGN", "operator": "CONTAINS", '
+                        '"options": ["Brand"]}. This is the endpoint\'s only '
+                        "filtering mechanism and it matches on names; there is "
+                        "no documented way to filter by ID."
+                    ),
                 ),
                 th.Property(
-                    "adgroup_ids",
-                    th.ArrayType(th.StringType),
-                    description="Restrict the report to these ad groups.",
-                ),
-                th.Property(
-                    "ad_ids",
-                    th.ArrayType(th.StringType),
-                    description="Restrict the report to these ads.",
+                    "window_days",
+                    th.IntegerType,
+                    description=(
+                        "Split the reporting window into slices of this many "
+                        "days, building one report per slice. Generation time "
+                        "grows with the window and the number of dimensions, "
+                        "so a year at a fine grain asked for in one report may "
+                        "never finish; 31 is a good starting point. Requires a "
+                        "time bucket (DAY/WEEK/MONTH) in dimensions, since "
+                        "otherwise every slice emits the same primary key. "
+                        "Unset means one report for the whole window."
+                    ),
                 ),
             ),
             title="Ad Performance Report",
             description=(
                 "Definition of the custom report built by the "
-                "performance_report stream via POST /reporting/create."
+                "performance_report stream via POST "
+                "/api/v3/advertisers/{advertiserId}/reports."
             ),
         ),
         th.Property(
@@ -158,10 +188,10 @@ class TapNextdoor(Tap):
             th.IntegerType,
             title="Lookback Days",
             description=(
-                "How far before the bookmark the ad_stats stream restarts on "
-                "an incremental run. Ad metrics are restated as conversions "
-                "are attributed after the fact, so recent days are "
-                "re-fetched. Defaults to 7."
+                "How far before the bookmark the ad_stats and "
+                "performance_report streams restart on an incremental run. Ad "
+                "metrics are restated as conversions are attributed after the "
+                "fact, so recent days are re-fetched. Defaults to 7."
             ),
             default=7,
         ),
