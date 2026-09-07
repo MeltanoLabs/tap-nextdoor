@@ -388,9 +388,6 @@ def test_unreachable_advertiser_ids_are_reported(config: dict, nam_api, caplog) 
 
 REPORTS_PATH = "/api/v3/advertisers/adv1/reports"
 
-# Zero interval so the poll loop does not actually sleep in tests.
-FAST_POLL = {"poll_interval_seconds": 0}
-
 
 def _create_bodies(nam_api) -> list[dict]:
     """Return the body of every create-report request made."""
@@ -403,7 +400,7 @@ def _create_bodies(nam_api) -> list[dict]:
 
 def test_report_is_advertiser_scoped_by_path(config: dict, nam_api) -> None:
     """The advertiser is in the URL, not the body, on the /api/v3 base."""
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     _sync_all(config)
 
     created = [
@@ -419,7 +416,6 @@ def test_report_is_advertiser_scoped_by_path(config: dict, nam_api) -> None:
 def test_report_definition_comes_from_config(config: dict, nam_api) -> None:
     """The body is built from the `report` block, with a nested window."""
     config["report"] = {
-        **FAST_POLL,
         "metrics": ["IMPRESSIONS", "CLICKS"],
         "dimensions": ["DAY", "CREATIVE_ID"],
         "name": "My report",
@@ -456,7 +452,7 @@ def test_report_defaults_to_day_and_ad_with_the_delivery_metrics(
     nam_api,
 ) -> None:
     """With no config the report is DAY x ad, on the delivery metrics."""
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     _sync_all(config)
 
     body = _create_bodies(nam_api)[0]
@@ -491,7 +487,7 @@ def test_report_is_polled_until_completed(config: dict, nam_api) -> None:
             },
         ],
     )
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
         "performance_report"
     ]
@@ -509,7 +505,7 @@ def test_report_is_polled_until_completed(config: dict, nam_api) -> None:
 
 def test_completed_report_is_not_polled(config: dict, nam_api) -> None:
     """A report already COMPLETED on creation is downloaded without polling."""
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
         "performance_report"
     ]
@@ -525,7 +521,6 @@ def test_completed_report_is_not_polled(config: dict, nam_api) -> None:
 def test_report_csv_is_parsed_into_records(config: dict, nam_api) -> None:  # noqa: ARG001
     """The downloaded CSV becomes records, including the creative columns."""
     config["report"] = {
-        **FAST_POLL,
         "dimensions": ["DAY", "AD_ID", "AD", "CREATIVE_ID", "CREATIVE"],
         "metrics": ["IMPRESSIONS", "CLICKS", "CTR", "SPEND"],
     }
@@ -589,7 +584,7 @@ def test_window_days_splits_the_run_into_one_report_per_slice(
 ) -> None:
     """A window longer than window_days becomes several smaller reports."""
     # conftest window is 2025-01-01..2025-01-31, i.e. 31 days.
-    config["report"] = {**FAST_POLL, "dimensions": ["DAY", "AD_ID"], "window_days": 10}
+    config["report"] = {"dimensions": ["DAY", "AD_ID"], "window_days": 10}
     _sync_all(config)
 
     ranges = [b["date_time_range"] for b in _create_bodies(nam_api)]
@@ -617,7 +612,7 @@ def test_window_days_splits_the_run_into_one_report_per_slice(
 
 def test_window_days_unset_builds_one_report(config: dict, nam_api) -> None:
     """Without window_days the whole window goes in a single report."""
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     _sync_all(config)
 
     assert [b["date_time_range"] for b in _create_bodies(nam_api)] == [
@@ -680,7 +675,7 @@ def test_report_resumes_from_the_bookmark_with_a_lookback(
     metrics are restated as conversions are attributed late.
     """
     config["lookback_days"] = 3
-    config["report"] = {**FAST_POLL, "dimensions": ["DAY", "AD_ID"]}
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
     tap = TapNextdoor(config=config, parse_env_config=False)
     stream = cast("NextdoorStream", tap.streams["performance_report"])
     # Stand in for a stored bookmark, rather than hand-building state JSON.
@@ -711,7 +706,7 @@ def test_report_bookmark_only_moves_the_start_forward(
     tap would generate a report for a period the user excluded.
     """
     config["lookback_days"] = 7
-    config["report"] = {**FAST_POLL, "dimensions": ["DAY", "AD_ID"]}
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
     tap = TapNextdoor(config=config, parse_env_config=False)
     stream = cast("NextdoorStream", tap.streams["performance_report"])
     monkeypatch.setattr(
@@ -733,7 +728,7 @@ def test_report_syncs_nothing_when_the_bookmark_passes_end_date(
 ) -> None:
     """A bookmark past end_date creates no report, and says why."""
     config["lookback_days"] = 0
-    config["report"] = {**FAST_POLL, "dimensions": ["DAY", "AD_ID"]}
+    config["report"] = {"dimensions": ["DAY", "AD_ID"]}
     tap = TapNextdoor(config=config, parse_env_config=False)
     stream = cast("NextdoorStream", tap.streams["performance_report"])
     monkeypatch.setattr(
@@ -773,7 +768,7 @@ def test_empty_report_logs_its_csv_header(config: dict, nam_api, caplog) -> None
         "https://example.com/report.csv",
         text="Date,Ad Id,Creative Id,Impressions\n",
     )
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
         "performance_report"
     ]
@@ -794,7 +789,6 @@ def test_non_numeric_metric_cell_becomes_null(config: dict, nam_api) -> None:  #
     sync down with a ValueError, discarding every row already fetched.
     """
     config["report"] = {
-        **FAST_POLL,
         "dimensions": ["DAY", "AD_ID"],
         "metrics": ["IMPRESSIONS", "SPEND"],
     }
@@ -837,7 +831,7 @@ def test_report_name_carries_the_window(config: dict, nam_api) -> None:
     objects accumulate in the account, so the name is the only thing that can
     identify the period one covers.
     """
-    config["report"] = {**FAST_POLL, "dimensions": ["DAY", "AD_ID"], "window_days": 20}
+    config["report"] = {"dimensions": ["DAY", "AD_ID"], "window_days": 20}
     _sync_all(config)
 
     assert [b["name"] for b in _create_bodies(nam_api)] == [
@@ -940,7 +934,7 @@ def test_failed_report_raises_rather_than_syncing_nothing(
         f"https://ads.nextdoor.com{REPORTS_PATH}/rep1",
         json={"id": "rep1", "advertiser_id": "adv1", "status": "FAILED"},
     )
-    config["report"] = dict(FAST_POLL)
+    config["report"] = {}
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
         "performance_report"
     ]
@@ -948,8 +942,17 @@ def test_failed_report_raises_rather_than_syncing_nothing(
         list(stream.get_records({"advertiser_id": "adv1"}))
 
 
-def test_poll_timeout_raises(config: dict, nam_api) -> None:
-    """A report still running at max_poll_seconds fails with actionable advice."""
+def test_poll_timeout_raises(
+    config: dict,
+    nam_api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report still running at the ceiling fails with actionable advice.
+
+    The advice has to be actionable *without* a setting to raise, since the
+    ceiling is a module constant now: a report still running at 30 minutes
+    wants a narrower window, not a longer wait.
+    """
     nam_api.post(
         f"https://ads.nextdoor.com{REPORTS_PATH}",
         json={"id": "rep1", "advertiser_id": "adv1", "status": "IN_PROGRESS"},
@@ -958,12 +961,36 @@ def test_poll_timeout_raises(config: dict, nam_api) -> None:
         f"https://ads.nextdoor.com{REPORTS_PATH}/rep1",
         json={"id": "rep1", "advertiser_id": "adv1", "status": "IN_PROGRESS"},
     )
-    config["report"] = {"poll_interval_seconds": 0, "max_poll_seconds": 0}
+    monkeypatch.setattr(streams, "MAX_POLL_SECONDS", 0)
+    config["report"] = {}
     stream = TapNextdoor(config=config, parse_env_config=False).streams[
         "performance_report"
     ]
-    with pytest.raises(RuntimeError, match="max_poll_seconds"):
+    with pytest.raises(RuntimeError, match="Narrow the window"):
         list(stream.get_records({"advertiser_id": "adv1"}))
+
+
+def test_poll_settings_are_not_config(config: dict) -> None:
+    """The poll interval and ceiling are constants, not `report` settings.
+
+    They were config once. A stale config carrying them must not look like it
+    is being honoured, and must not fail either - the SDK would reject an
+    unknown key only if the schema forbade extras.
+    """
+    assert (
+        "poll_interval_seconds"
+        not in TapNextdoor.config_jsonschema["properties"]["report"]["properties"]
+    )
+    assert (
+        "max_poll_seconds"
+        not in TapNextdoor.config_jsonschema["properties"]["report"]["properties"]
+    )
+
+    stream = TapNextdoor(config=config, parse_env_config=False).streams[
+        "performance_report"
+    ]
+    assert "poll_interval_seconds" not in stream.report_config
+    assert "max_poll_seconds" not in stream.report_config
 
 
 def test_stream_name_is_configurable(config: dict) -> None:

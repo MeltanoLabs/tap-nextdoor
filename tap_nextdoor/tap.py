@@ -175,26 +175,6 @@ class TapNextdoor(Tap):
                         "Unset means one report for the whole window."
                     ),
                 ),
-                th.Property(
-                    "poll_interval_seconds",
-                    th.IntegerType,
-                    description=(
-                        "Seconds between status checks while the report is "
-                        "generating. Defaults to 5."
-                    ),
-                    default=5,
-                ),
-                th.Property(
-                    "max_poll_seconds",
-                    th.IntegerType,
-                    description=(
-                        "How long to wait for the report to reach COMPLETED "
-                        "before failing the sync. Generation is asynchronous "
-                        "and a wide window at a fine grain can take many "
-                        "minutes. Defaults to 1800 (30 minutes)."
-                    ),
-                    default=1800,
-                ),
             ),
             title="Ad Performance Report",
             description=(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from tap_nextdoor import streams
+
 BASE = "https://ads.nextdoor.com/v2/api"
 V3_BASE = "https://ads.nextdoor.com/api/v3"
 
@@ -39,6 +41,17 @@ def _campaign(i: int) -> dict:
         # Java ZonedDateTime, as returned live.
         "start_time": "2025-01-01T00:01:34+01:00[Europe/London]",
     }
+
+
+@pytest.fixture(autouse=True)
+def _no_poll_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the report poll loop from really sleeping between status checks.
+
+    The interval is a module constant rather than config, so a test that
+    exercises the STARTED -> COMPLETED path would otherwise wait
+    ``POLL_INTERVAL_SECONDS`` per check.
+    """
+    monkeypatch.setattr(streams, "POLL_INTERVAL_SECONDS", 0)
 
 
 @pytest.fixture

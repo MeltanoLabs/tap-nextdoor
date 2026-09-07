@@ -133,8 +133,6 @@ config:
         operator: CONTAINS
         options: [Brand]
     window_days: 31                # split long windows into monthly reports
-    poll_interval_seconds: 5
-    max_poll_seconds: 1800         # 30 min; generation is slow
 ```
 
 `metrics`, `dimensions`, `type` and each `filters` entry are validated before any request is made, so a typo fails with the supported values listed rather than a bare 400.
@@ -206,11 +204,11 @@ The bookmark only ever moves the start *forward*: lowering `start_date` is not u
 
 ### The report is polled
 
-The reference presents creation as synchronous and returns a `download_url` in the 200. But the same response carries a `status` whose enum includes `STARTED` and `IN_PROGRESS`, so that URL cannot be trusted to be ready. The tap therefore polls `GET /api/v3/advertisers/{advertiserId}/reports/{reportId}` every `poll_interval_seconds` until the status is `COMPLETED`, then downloads.
+The reference presents creation as synchronous and returns a `download_url` in the 200. But the same response carries a `status` whose enum includes `STARTED` and `IN_PROGRESS`, so that URL cannot be trusted to be ready. The tap therefore polls `GET /api/v3/advertisers/{advertiserId}/reports/{reportId}` every 5 seconds until the status is `COMPLETED`, then downloads.
 
 - A report already `COMPLETED` on creation is downloaded immediately, with no poll.
 - A report that ends `FAILED`, `CANCELED`, `CANCELING` or `ARCHIVED` **raises**, rather than silently syncing zero rows.
-- A report still running at `max_poll_seconds` **raises**, naming the setting to raise. The default is **1800s (30 minutes)**: generation is genuinely slow - a month-long window at ad x creative x placement x day grain was still `IN_PROGRESS` after 5 minutes on a live account.
+- A report still running at the ceiling **raises**, pointing at `window_days`. The interval (5s) and the ceiling (1800s, 30 minutes) are the module constants `POLL_INTERVAL_SECONDS` and `MAX_POLL_SECONDS`, **not settings**: the endpoint gives no progress signal to tune an interval against, and raising a ceiling is the wrong answer to hitting it - a report still generating after 30 minutes wants a narrower window, not a longer wait. Generation is genuinely slow: a month-long window at ad x creative x placement x day grain was still `IN_PROGRESS` after 5 minutes on a live account.
 - Progress is logged every 30s while waiting, so a long generation is distinguishable from a hung sync.
 - A response carrying no `status` at all is trusted as-is, so an undocumented shape does not fail the sync on a technicality.
 

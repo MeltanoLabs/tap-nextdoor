@@ -1136,6 +1136,19 @@ REPORT_FILTER_OPERATORS = ("CONTAINS",)
 #: many minutes, and a silent wait is indistinguishable from a hung sync.
 _POLL_LOG_INTERVAL_SECONDS = 30
 
+#: Seconds between status checks while a report generates. Not configurable:
+#: the endpoint gives no progress signal to tune against, and a shorter
+#: interval only adds requests to a wait dominated by server-side generation.
+POLL_INTERVAL_SECONDS = 5
+
+#: How long to wait for a report to reach COMPLETED before giving up. Not
+#: configurable, because raising it is the wrong response to hitting it: a
+#: report still running at 30 minutes is one asking for too wide a window at
+#: too fine a grain, and ``window_days`` is the fix. A month at
+#: ad x creative x placement x day grain was still IN_PROGRESS after 5
+#: minutes on a live account, so the ceiling is deliberately generous.
+MAX_POLL_SECONDS = 1800
+
 #: Report statuses that will never become COMPLETED.
 _FAILED_STATUSES = frozenset({"CANCELING", "CANCELED", "FAILED", "ARCHIVED"})
 
@@ -1383,11 +1396,6 @@ def _as_offset_datetime(day: date) -> str:
     return datetime(day.year, day.month, day.day, tzinfo=timezone.utc).isoformat()
 
 
-def _defaulted(value: int | str | None, default: int) -> int:
-    """Return ``value`` as an int, or ``default`` when it is unset."""
-    return default if value is None else int(value)
-
-
 class PerformanceReportStream(NextdoorStream):
     """A custom performance report, defined entirely by the ``report`` config.
 
@@ -1428,7 +1436,7 @@ class PerformanceReportStream(NextdoorStream):
       synchronous, but the enum includes ``STARTED`` and ``IN_PROGRESS``, so
       the report is polled until it reports ``COMPLETED`` before the CSV is
       downloaded. A report that ends ``FAILED``/``CANCELED``/``ARCHIVED``, or
-      is still running at ``max_poll_seconds``, raises rather than silently
+      is still running at :data:`MAX_POLL_SECONDS`, raises rather than silently
       syncing zero rows.
 
     The CSV's column headers are normalised to snake_case (``"Ad ID"`` ->
@@ -1590,12 +1598,7 @@ class PerformanceReportStream(NextdoorStream):
             "stream_name": configured.get("stream_name") or _slug(name),
             "recipient_emails": list(configured.get("recipient_emails") or []),
             "filters": filters,
-            # Explicit None checks, not `or`: 0 is a meaningful interval.
             "window_days": window_days,
-            "poll_interval_seconds": _defaulted(
-                configured.get("poll_interval_seconds"), 5
-            ),
-            "max_poll_seconds": _defaulted(configured.get("max_poll_seconds"), 1800),
         }
 
     @staticmethod
@@ -1859,6 +1862,10 @@ class PerformanceReportStream(NextdoorStream):
     def _await_completion(self, created: dict) -> dict:
         """Poll the created report until it reports ``COMPLETED``.
 
+        The interval and the ceiling are the module constants
+        :data:`POLL_INTERVAL_SECONDS` and :data:`MAX_POLL_SECONDS`, not config
+        - see those for why.
+
         Args:
             created: The body returned by the create call.
 
@@ -1867,7 +1874,7 @@ class PerformanceReportStream(NextdoorStream):
 
         Raises:
             RuntimeError: If the report reaches a terminal failure status, or
-                is still running after ``max_poll_seconds``.
+                is still running after :data:`MAX_POLL_SECONDS`.
         """
         report = created
         status = report.get("status")
@@ -1879,7 +1886,7 @@ class PerformanceReportStream(NextdoorStream):
         if status is None or not (advertiser_id and report_id):
             return report
 
-        budget = self.report_config["max_poll_seconds"]
+        budget = MAX_POLL_SECONDS
         started = time.monotonic()
         last_logged = 0.0
 
@@ -1890,9 +1897,9 @@ class PerformanceReportStream(NextdoorStream):
             elapsed = time.monotonic() - started
             if elapsed >= budget:
                 msg = (
-                    f"Report {report_id} was still {status} after "
-                    f"{budget}s. Raise report.max_poll_seconds, or narrow the "
-                    "window."
+                    f"Report {report_id} was still {status} after {budget}s. "
+                    "Narrow the window with report.window_days, or ask for "
+                    "fewer dimensions - generation time grows with both."
                 )
                 raise RuntimeError(msg)
             if elapsed - last_logged >= _POLL_LOG_INTERVAL_SECONDS:
@@ -1904,7 +1911,7 @@ class PerformanceReportStream(NextdoorStream):
                     elapsed,
                     budget,
                 )
-            time.sleep(self.report_config["poll_interval_seconds"])
+            time.sleep(POLL_INTERVAL_SECONDS)
             report = self._fetch_report(advertiser_id, report_id)
             status = report.get("status")
 
